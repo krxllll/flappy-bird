@@ -11,6 +11,7 @@ from flappy_bird_ai.agent import BirdAgent  # noqa: E402
 from flappy_bird_ai.genetic import (  # noqa: E402
     adapt_mutation_after_breakthrough,
     adaptive_mutation_strength,
+    calculate_champion_score,
     create_next_generation,
     is_better_result,
     target_reached,
@@ -100,24 +101,76 @@ def test_higher_pipe_count_beats_higher_survival_time():
 def test_target_pipe_threshold_detects_success():
     assert target_reached({"pipes_passed": 10}, target_pipes=10)
     assert not target_reached({"pipes_passed": 9}, target_pipes=10)
+    assert target_reached({"validated_mean_pipes": 10.0}, target_pipes=10)
+    assert not target_reached({"validated_mean_pipes": 9.9}, target_pipes=10)
 
 
 def test_global_best_comparison_prefers_pipes_then_fitness():
-    current_best = {"pipes_passed": 2, "fitness": 9000.0}
-    more_pipes = {"pipes_passed": 3, "fitness": 4000.0}
-    same_pipes_more_fitness = {"pipes_passed": 2, "fitness": 9500.0}
-    fewer_pipes_more_fitness = {"pipes_passed": 1, "fitness": 20000.0}
+    current_best = {
+        "validated_mean_pipes": 2.0,
+        "validated_mean_fitness": 9000.0,
+        "champion_score": 2.0,
+    }
+    more_pipes = {
+        "validated_mean_pipes": 3.0,
+        "validated_mean_fitness": 4000.0,
+        "champion_score": 2.5,
+    }
+    same_pipes_more_score = {
+        "validated_mean_pipes": 2.0,
+        "validated_mean_fitness": 9500.0,
+        "champion_score": 2.2,
+    }
+    fewer_pipes_more_fitness = {
+        "validated_mean_pipes": 1.0,
+        "validated_mean_fitness": 20000.0,
+        "champion_score": 3.0,
+    }
 
     assert is_better_result(more_pipes, current_best)
-    assert is_better_result(same_pipes_more_fitness, current_best)
+    assert is_better_result(same_pipes_more_score, current_best)
     assert not is_better_result(fewer_pipes_more_fitness, current_best)
 
 
-def test_global_best_comparison_prioritizes_pipes_over_raw_fitness():
-    current_best = {"pipes_passed": 4, "fitness": 50000.0}
-    candidate = {"pipes_passed": 5, "fitness": 10000.0}
+def test_champion_comparison_prioritizes_validated_mean_pipes():
+    current_best = {
+        "validated_mean_pipes": 4.0,
+        "validated_mean_fitness": 50000.0,
+        "champion_score": 6.0,
+    }
+    candidate = {
+        "validated_mean_pipes": 5.0,
+        "validated_mean_fitness": 10000.0,
+        "champion_score": 4.0,
+    }
 
     assert is_better_result(candidate, current_best)
+
+
+def test_unstable_champions_are_penalized_by_std_and_min_pipes():
+    stable_score = calculate_champion_score(
+        validated_mean_pipes=10.0,
+        validated_min_pipes=8,
+        validated_std_pipes=1.0,
+    )
+    unstable_score = calculate_champion_score(
+        validated_mean_pipes=10.0,
+        validated_min_pipes=2,
+        validated_std_pipes=5.0,
+    )
+    stable = {
+        "validated_mean_pipes": 10.0,
+        "validated_mean_fitness": 10000.0,
+        "champion_score": stable_score,
+    }
+    unstable = {
+        "validated_mean_pipes": 10.0,
+        "validated_mean_fitness": 10000.0,
+        "champion_score": unstable_score,
+    }
+
+    assert stable_score > unstable_score
+    assert is_better_result(stable, unstable)
 
 
 def test_adaptive_mutation_strength_decreases_to_minimum():
@@ -159,8 +212,8 @@ def test_mutation_is_reduced_after_breakthrough_threshold():
 
     assert unchanged_rate == 0.15
     assert unchanged_strength == 0.12
-    assert reduced_rate == 0.08
-    assert reduced_strength == 0.05
+    assert reduced_rate == 0.05
+    assert reduced_strength == 0.03
 
 
 def test_elites_are_copied_and_not_mutated_in_place():

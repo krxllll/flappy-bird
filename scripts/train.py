@@ -21,6 +21,7 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     VALIDATION_EPISODES,
     adapt_mutation_after_breakthrough,
     adaptive_mutation_strength,
+    calculate_champion_score,
     create_next_generation,
     initialize_population,
     is_better_result,
@@ -44,11 +45,14 @@ def save_training_history(history, path):
         "mean_pipes",
         "best_frames",
         "mean_frames",
-        "global_best_pipes",
-        "global_best_fitness",
-        "champion_mean_pipes",
-        "champion_max_pipes",
-        "champion_min_pipes",
+        "validated_mean_pipes",
+        "validated_min_pipes",
+        "validated_max_pipes",
+        "validated_std_pipes",
+        "validated_mean_fitness",
+        "champion_score",
+        "mutation_rate",
+        "mutation_strength",
     ]
 
     with path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -59,28 +63,48 @@ def save_training_history(history, path):
 
 def save_progress_plots(history):
     generations = [row["generation"] for row in history]
+    best_fitness = [row["best_fitness"] for row in history]
+    mean_fitness = [row["mean_fitness"] for row in history]
+    best_pipes = [row["best_pipes"] for row in history]
+    mean_pipes = [row["mean_pipes"] for row in history]
+    validated_fitness = [row["validated_mean_fitness"] for row in history]
+    validated_pipes = [row["validated_mean_pipes"] for row in history]
 
     plt.figure(figsize=(10, 5))
     plt.plot(
         generations,
-        [row["best_fitness"] for row in history],
+        best_fitness,
         label="Generation Best Fitness",
         color="green",
         linewidth=2,
     )
     plt.plot(
         generations,
-        [row["mean_fitness"] for row in history],
+        mean_fitness,
         label="Mean Fitness",
         color="orange",
         linestyle="--",
     )
     plt.plot(
         generations,
-        [row["global_best_fitness"] for row in history],
-        label="Validated Global Best Fitness",
+        validated_fitness,
+        label="Validated Champion Fitness",
         color="blue",
         linewidth=2,
+    )
+    plt.plot(
+        generations,
+        moving_average(best_fitness),
+        label="Generation Best Fitness MA(5)",
+        color="darkgreen",
+        linestyle=":",
+    )
+    plt.plot(
+        generations,
+        moving_average(mean_fitness),
+        label="Mean Fitness MA(5)",
+        color="darkorange",
+        linestyle=":",
     )
     plt.title("Flappy Bird Genetic Algorithm Fitness Progression")
     plt.xlabel("Generation")
@@ -94,32 +118,45 @@ def save_progress_plots(history):
     plt.figure(figsize=(10, 5))
     plt.plot(
         generations,
-        [row["best_pipes"] for row in history],
+        best_pipes,
         label="Generation Best Pipes",
         color="blue",
         linewidth=2,
     )
     plt.plot(
         generations,
-        [row["mean_pipes"] for row in history],
+        mean_pipes,
         label="Mean Pipes",
         color="purple",
         linestyle="--",
     )
     plt.plot(
         generations,
-        [row["global_best_pipes"] for row in history],
-        label="Validated Global Best Pipes",
+        validated_pipes,
+        label="Validated Champion Mean Pipes",
         color="green",
         linewidth=2,
     )
     plt.plot(
         generations,
-        [row["champion_mean_pipes"] for row in history],
-        label="Champion Re-eval Mean Pipes",
+        [row["validated_min_pipes"] for row in history],
+        label="Validated Champion Min Pipes",
         color="red",
+        linestyle="--",
+    )
+    plt.plot(
+        generations,
+        moving_average(best_pipes),
+        label="Generation Best Pipes MA(5)",
+        color="navy",
         linestyle=":",
-        linewidth=2,
+    )
+    plt.plot(
+        generations,
+        moving_average(mean_pipes),
+        label="Mean Pipes MA(5)",
+        color="purple",
+        linestyle=":",
     )
     plt.title("Flappy Bird Pipe Progression")
     plt.xlabel("Generation")
@@ -132,20 +169,28 @@ def save_progress_plots(history):
 
 
 def summarize_results(results):
+    pipes = np.array([result["pipes_passed"] for result in results], dtype=float)
+    fitness = np.array([result["fitness"] for result in results], dtype=float)
+    mean_pipes = float(np.mean(pipes))
+    min_pipes = int(np.min(pipes))
+    std_pipes = float(np.std(pipes))
+
     return {
-        "fitness": float(np.mean([result["fitness"] for result in results])),
-        "frames": float(np.mean([result["frames"] for result in results])),
-        "pipes_passed": float(np.mean([result["pipes_passed"] for result in results])),
+        "validated_mean_pipes": mean_pipes,
+        "validated_min_pipes": min_pipes,
+        "validated_max_pipes": int(np.max(pipes)),
+        "validated_std_pipes": std_pipes,
+        "validated_mean_fitness": float(np.mean(fitness)),
+        "champion_score": calculate_champion_score(mean_pipes, min_pipes, std_pipes),
     }
 
 
-def summarize_champion_pipes(results):
-    pipes = [result["pipes_passed"] for result in results]
-    return {
-        "champion_mean_pipes": float(np.mean(pipes)),
-        "champion_max_pipes": int(np.max(pipes)),
-        "champion_min_pipes": int(np.min(pipes)),
-    }
+def moving_average(values, window=5):
+    averaged = []
+    for index in range(len(values)):
+        start = max(0, index - window + 1)
+        averaged.append(float(np.mean(values[start : index + 1])))
+    return averaged
 
 
 def validate_chromosome(chromosome, episodes=VALIDATION_EPISODES):
@@ -161,7 +206,14 @@ def evaluate_champion(chromosome, episodes=CHAMPION_EVALUATION_EPISODES):
         evaluate_chromosome(chromosome, render=False)
         for _ in range(episodes)
     ]
-    return summarize_champion_pipes(results)
+    return summarize_results(results)
+
+
+def should_validate_candidate(candidate_result, current_best):
+    if current_best is None:
+        return True
+
+    return candidate_result["pipes_passed"] >= current_best["validated_mean_pipes"]
 
 
 def train_evolutionary_ai():
@@ -207,8 +259,14 @@ def train_evolutionary_ai():
         best_frames = int(frame_scores[0])
         mean_frames = np.mean(frame_scores)
 
+        current_mutation_strength = adaptive_mutation_strength(g, GENERATIONS)
+        current_mutation_rate = MUTATION_RATE
+
         validation_count = min(TOP_VALIDATION_COUNT, POPULATION_SIZE)
         for candidate_index in range(validation_count):
+            if not should_validate_candidate(evaluation_results[candidate_index], global_best_result):
+                continue
+
             validation_result = validate_chromosome(population[candidate_index])
 
             if is_better_result(validation_result, global_best_result):
@@ -217,24 +275,40 @@ def train_evolutionary_ai():
                 np.save(BEST_GENOME_PATH, global_best_genome)
                 print(
                     "New global best saved | "
-                    f"Validated pipes: {global_best_result['pipes_passed']:.2f} | "
-                    f"Validated fitness: {global_best_result['fitness']:.1f}"
+                    f"Validated mean pipes: {global_best_result['validated_mean_pipes']:.2f} | "
+                    f"Validated fitness: {global_best_result['validated_mean_fitness']:.1f} | "
+                    f"Champion score: {global_best_result['champion_score']:.2f}"
                 )
 
-        global_best_pipes = (
-            global_best_result["pipes_passed"] if global_best_result is not None else 0.0
-        )
-        global_best_fitness = (
-            global_best_result["fitness"] if global_best_result is not None else 0.0
-        )
-        champion_stats = {
-            "champion_mean_pipes": 0.0,
-            "champion_max_pipes": 0,
-            "champion_min_pipes": 0,
+        validated_stats = {
+            "validated_mean_pipes": 0.0,
+            "validated_min_pipes": 0,
+            "validated_max_pipes": 0,
+            "validated_std_pipes": 0.0,
+            "validated_mean_fitness": 0.0,
+            "champion_score": 0.0,
         }
 
         if global_best_genome is not None:
-            champion_stats = evaluate_champion(global_best_genome)
+            champion_result = evaluate_champion(global_best_genome)
+
+            if is_better_result(champion_result, global_best_result):
+                global_best_result = champion_result
+                global_best_genome = global_best_genome.copy()
+                np.save(BEST_GENOME_PATH, global_best_genome)
+
+            validated_stats = champion_result
+
+        breakthrough_pipes = (
+            global_best_result["validated_mean_pipes"]
+            if global_best_result is not None
+            else 0.0
+        )
+        current_mutation_rate, current_mutation_strength = adapt_mutation_after_breakthrough(
+            current_mutation_rate,
+            current_mutation_strength,
+            breakthrough_pipes,
+        )
 
         training_history.append(
             {
@@ -245,9 +319,9 @@ def train_evolutionary_ai():
                 "mean_pipes": mean_pipes,
                 "best_frames": best_frames,
                 "mean_frames": mean_frames,
-                "global_best_pipes": global_best_pipes,
-                "global_best_fitness": global_best_fitness,
-                **champion_stats,
+                **validated_stats,
+                "mutation_rate": current_mutation_rate,
+                "mutation_strength": current_mutation_strength,
             }
         )
 
@@ -255,37 +329,27 @@ def train_evolutionary_ai():
             f"Generation {g + 1:02d} | Best fitness: {best_fit:.1f} | "
             f"Avg fitness: {mean_fit:.1f} | Best pipes: {best_pipes} | "
             f"Avg pipes: {mean_pipes:.1f} | Best frames: {best_frames} | "
-            f"Global best pipes: {global_best_pipes:.2f} | "
-            f"Global best fitness: {global_best_fitness:.1f} | "
-            f"Champion pipes mean/max/min: "
-            f"{champion_stats['champion_mean_pipes']:.2f}/"
-            f"{champion_stats['champion_max_pipes']}/"
-            f"{champion_stats['champion_min_pipes']}"
+            f"Validated champion pipes mean/min/max/std: "
+            f"{validated_stats['validated_mean_pipes']:.2f}/"
+            f"{validated_stats['validated_min_pipes']}/"
+            f"{validated_stats['validated_max_pipes']}/"
+            f"{validated_stats['validated_std_pipes']:.2f} | "
+            f"Champion score: {validated_stats['champion_score']:.2f} | "
+            f"Mutation: {current_mutation_rate:.3f}/{current_mutation_strength:.3f}"
         )
 
-        champion_target_result = {
-            "pipes_passed": champion_stats["champion_mean_pipes"],
-            "fitness": global_best_fitness,
-        }
-
-        if global_best_genome is not None and target_reached(champion_target_result, TARGET_PIPES):
+        if global_best_genome is not None and target_reached(validated_stats, TARGET_PIPES):
             print(
                 "Target confirmed by champion re-evaluation: "
-                f"champion averaged {champion_stats['champion_mean_pipes']:.2f} pipes"
+                f"champion averaged {validated_stats['validated_mean_pipes']:.2f} pipes"
             )
 
             if EARLY_STOP_ON_TARGET:
                 break
 
-        current_mutation_strength = adaptive_mutation_strength(g, GENERATIONS)
-        current_mutation_rate = MUTATION_RATE
-        current_mutation_rate, current_mutation_strength = adapt_mutation_after_breakthrough(
-            current_mutation_rate,
-            current_mutation_strength,
-            global_best_pipes,
-        )
         population = create_next_generation(
             population,
+            chromosome_length=chrom_len,
             pop_size=POPULATION_SIZE,
             mutation_strength=current_mutation_strength,
             mutation_rate=current_mutation_rate,

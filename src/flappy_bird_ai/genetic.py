@@ -11,12 +11,13 @@ ELITE_SIZE = 5
 TARGET_PIPES = 10
 EARLY_STOP_ON_TARGET = True
 TOP_VALIDATION_COUNT = 5
-VALIDATION_EPISODES = 3
-CHAMPION_EVALUATION_EPISODES = 5
-CHAMPION_OFFSPRING_RATIO = 0.2
+VALIDATION_EPISODES = 10
+CHAMPION_EVALUATION_EPISODES = 10
+CHAMPION_OFFSPRING_RATIO = 0.3
+RANDOM_IMMIGRANT_RATIO = 0.1
 BREAKTHROUGH_PIPES = 10
-POST_BREAKTHROUGH_MUTATION_RATE = 0.08
-POST_BREAKTHROUGH_MUTATION_STRENGTH = 0.05
+POST_BREAKTHROUGH_MUTATION_RATE = 0.05
+POST_BREAKTHROUGH_MUTATION_STRENGTH = 0.03
 
 
 def initialize_population(pop_size, chromosome_length):
@@ -65,14 +66,29 @@ def adapt_mutation_after_breakthrough(
     )
 
 
+def calculate_champion_score(
+    validated_mean_pipes,
+    validated_min_pipes,
+    validated_std_pipes,
+):
+    """Score champion consistency while keeping mean pipes dominant."""
+    return float(
+        validated_mean_pipes
+        + 0.3 * validated_min_pipes
+        - 0.1 * validated_std_pipes
+    )
+
+
 def create_next_generation(
     population,
+    chromosome_length=None,
     pop_size=POPULATION_SIZE,
     elite_size=ELITE_SIZE,
     mutation_strength=MUTATION_STRENGTH,
     mutation_rate=MUTATION_RATE,
     global_best_genome=None,
     champion_offspring_ratio=CHAMPION_OFFSPRING_RATIO,
+    random_immigrant_ratio=RANDOM_IMMIGRANT_RATIO,
 ):
     """Create a new generation while preserving elites and the champion."""
     next_generation = []
@@ -99,9 +115,14 @@ def create_next_generation(
             )
             next_generation.append(champion_child)
 
+    if chromosome_length is None:
+        chromosome_length = population.shape[1]
+
+    random_immigrant_count = int(pop_size * random_immigrant_ratio)
+    reserved_for_random = random_immigrant_count
     parent_pool_size = min(len(population), max(1, int(pop_size * 0.4)))
 
-    while len(next_generation) < pop_size:
+    while len(next_generation) < pop_size - reserved_for_random:
         p1_idx = np.random.randint(0, parent_pool_size)
         p2_idx = np.random.randint(0, parent_pool_size)
 
@@ -113,19 +134,36 @@ def create_next_generation(
         )
         next_generation.append(child)
 
+    while len(next_generation) < pop_size:
+        next_generation.append(
+            np.random.uniform(-1.0, 1.0, chromosome_length)
+        )
+
     return np.array(next_generation)
 
 
 def is_better_result(candidate, current_best):
-    """Compare results by pipes first, then fitness."""
+    """Compare validated champions by mean pipes, consistency, then fitness."""
     if current_best is None:
         return True
 
-    candidate_key = (candidate["pipes_passed"], candidate["fitness"])
-    current_key = (current_best["pipes_passed"], current_best["fitness"])
+    candidate_key = (
+        candidate["validated_mean_pipes"],
+        candidate["champion_score"],
+        candidate["validated_mean_fitness"],
+    )
+    current_key = (
+        current_best["validated_mean_pipes"],
+        current_best["champion_score"],
+        current_best["validated_mean_fitness"],
+    )
     return candidate_key > current_key
 
 
 def target_reached(evaluation_result, target_pipes=TARGET_PIPES):
     """Return True when an evaluation result meets the pipe target."""
-    return evaluation_result["pipes_passed"] >= target_pipes
+    pipes = evaluation_result.get(
+        "validated_mean_pipes",
+        evaluation_result.get("pipes_passed", 0),
+    )
+    return pipes >= target_pipes
