@@ -2,7 +2,7 @@ import numpy as np
 
 
 POPULATION_SIZE = 50
-GENERATIONS = 50
+GENERATIONS = 100
 MUTATION_RATE = 0.15
 INITIAL_MUTATION_STRENGTH = 0.2
 MIN_MUTATION_STRENGTH = 0.05
@@ -12,6 +12,11 @@ TARGET_PIPES = 10
 EARLY_STOP_ON_TARGET = True
 TOP_VALIDATION_COUNT = 5
 VALIDATION_EPISODES = 3
+CHAMPION_EVALUATION_EPISODES = 5
+CHAMPION_OFFSPRING_RATIO = 0.2
+BREAKTHROUGH_PIPES = 10
+POST_BREAKTHROUGH_MUTATION_RATE = 0.08
+POST_BREAKTHROUGH_MUTATION_STRENGTH = 0.05
 
 
 def initialize_population(pop_size, chromosome_length):
@@ -44,26 +49,68 @@ def adaptive_mutation_strength(
     return max(min_strength, initial_strength * (1 - progress))
 
 
+def adapt_mutation_after_breakthrough(
+    mutation_rate,
+    mutation_strength,
+    global_best_pipes,
+    breakthrough_pipes=BREAKTHROUGH_PIPES,
+):
+    """Tighten mutation after the champion reaches a pipe breakthrough."""
+    if global_best_pipes < breakthrough_pipes:
+        return mutation_rate, mutation_strength
+
+    return (
+        min(mutation_rate, POST_BREAKTHROUGH_MUTATION_RATE),
+        min(mutation_strength, POST_BREAKTHROUGH_MUTATION_STRENGTH),
+    )
+
+
 def create_next_generation(
     population,
     pop_size=POPULATION_SIZE,
     elite_size=ELITE_SIZE,
     mutation_strength=MUTATION_STRENGTH,
+    mutation_rate=MUTATION_RATE,
+    global_best_genome=None,
+    champion_offspring_ratio=CHAMPION_OFFSPRING_RATIO,
 ):
-    """Create a new generation while preserving copied elites unchanged."""
+    """Create a new generation while preserving elites and the champion."""
     next_generation = []
 
+    if global_best_genome is not None:
+        next_generation.append(global_best_genome.copy())
+
     for elite_index in range(elite_size):
+        if len(next_generation) >= pop_size:
+            break
         next_generation.append(population[elite_index].copy())
 
-    parent_pool_size = max(1, int(pop_size * 0.4))
+    if global_best_genome is not None:
+        champion_offspring_count = int(pop_size * champion_offspring_ratio)
+
+        for _ in range(champion_offspring_count):
+            if len(next_generation) >= pop_size:
+                break
+            champion_child = global_best_genome.copy()
+            champion_child = mutate(
+                champion_child,
+                mutation_strength=mutation_strength,
+                mutation_rate=mutation_rate,
+            )
+            next_generation.append(champion_child)
+
+    parent_pool_size = min(len(population), max(1, int(pop_size * 0.4)))
 
     while len(next_generation) < pop_size:
         p1_idx = np.random.randint(0, parent_pool_size)
         p2_idx = np.random.randint(0, parent_pool_size)
 
         child = crossover(population[p1_idx], population[p2_idx]).copy()
-        child = mutate(child, mutation_strength=mutation_strength)
+        child = mutate(
+            child,
+            mutation_strength=mutation_strength,
+            mutation_rate=mutation_rate,
+        )
         next_generation.append(child)
 
     return np.array(next_generation)

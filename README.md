@@ -15,7 +15,7 @@ The network output is converted into a binary action: flap or do nothing.
 
 Training starts with a random population of birds. Each chromosome is evaluated by running one Flappy Bird game. After each generation, the population is sorted, copied elites are preserved, selected parents are crossed over, and mutation creates the rest of the next generation.
 
-Fitness is now pipe-first:
+Fitness is pipe-first:
 
 ```text
 fitness = frames_survived + (pipes_passed ** 2) * PIPE_REWARD
@@ -23,46 +23,67 @@ fitness = frames_survived + (pipes_passed ** 2) * PIPE_REWARD
 
 `PIPE_REWARD` is defined in `src/flappy_bird_ai/simulation.py` and is currently `1000.0`. Frames still provide a small continuous reward, but passing more pipes is the main objective.
 
-## Hall Of Fame
+## Hall Of Fame Preservation
 
-Training keeps a global best genome across all generations. This protects against the best discovered bird being lost when later generations perform worse.
+Training keeps a global best genome across all generations. This protects against losing a strong bird when later generations perform worse.
 
-Global-best comparison uses:
+Global-best comparison uses validated results:
 
-1. More pipes passed
-2. Higher fitness if pipe count is tied
+1. More validated pipes passed
+2. Higher validated fitness if pipe count is tied
 
-The file `outputs/best_bird_genome.npy` is saved only when the validated global best improves.
+The file `outputs/best_bird_genome.npy` is saved only when validation confirms that the global best improved.
 
-## Validation And Target Pipes
+The global best is also injected into every new generation with `.copy()`, so it cannot be mutated accidentally. A configurable part of the next population is created from small mutations of the global best using `CHAMPION_OFFSPRING_RATIO`.
 
-Normal population evaluation stays fast with one episode per bird. After each generation, the top candidates are re-evaluated for several validation episodes. This reduces the chance of saving a one-time lucky run as the champion.
+## Champion Validation
 
-Training uses `TARGET_PIPES` from `src/flappy_bird_ai/genetic.py`. The default target is `10` pipes. If the validated global best reaches the target, training prints a confirmation message. If `EARLY_STOP_ON_TARGET` is `True`, training stops early only after validation confirms the target.
+Normal population evaluation stays fast with one episode per bird. After each generation, the top candidates are re-evaluated for several validation episodes before they can replace the global best.
 
-Mutation strength is adaptive. It starts at `INITIAL_MUTATION_STRENGTH` and gradually cools down toward `MIN_MUTATION_STRENGTH` as generations progress.
+The current champion is also re-evaluated after each generation. These values are logged in `outputs/training_history.csv`:
+
+- `champion_mean_pipes`
+- `champion_max_pipes`
+- `champion_min_pipes`
+
+This makes it easier to see whether the saved champion is consistently strong or just had one lucky run.
+
+## Adaptive Mutation
+
+Mutation strength cools down gradually over training. After the validated global best reaches `BREAKTHROUGH_PIPES` pipes, currently `10`, mutation is tightened further:
+
+```text
+mutation_rate = min(current_mutation_rate, 0.08)
+mutation_strength = min(current_mutation_strength, 0.05)
+```
+
+This keeps exploration early in training while making later improvements less destructive once a good behavior appears.
+
+## Target Pipes
+
+Training uses `TARGET_PIPES` from `src/flappy_bird_ai/genetic.py`. If the validated global best reaches this target, training prints a confirmation message. If `EARLY_STOP_ON_TARGET` is `True`, training stops early only after validation confirms the target.
 
 ## Project Structure
 
 ```text
 flappy-bird-neuroevolution/
-├── README.md
-├── requirements.txt
-├── .gitignore
-├── src/
-│   └── flappy_bird_ai/
-│       ├── __init__.py
-│       ├── agent.py
-│       ├── simulation.py
-│       └── genetic.py
-├── scripts/
-│   ├── sanity_check.py
-│   ├── train.py
-│   └── enjoy.py
-├── outputs/
-│   └── .gitkeep
-└── tests/
-    └── test_agent.py
+|-- README.md
+|-- requirements.txt
+|-- .gitignore
+|-- src/
+|   `-- flappy_bird_ai/
+|       |-- __init__.py
+|       |-- agent.py
+|       |-- simulation.py
+|       `-- genetic.py
+|-- scripts/
+|   |-- sanity_check.py
+|   |-- train.py
+|   `-- enjoy.py
+|-- outputs/
+|   `-- .gitkeep
+`-- tests/
+    `-- test_agent.py
 ```
 
 ## Outputs
@@ -74,17 +95,7 @@ Training writes generated files into `outputs/`:
 - `outputs/fitness_progression.png`
 - `outputs/pipe_progression.png`
 
-The CSV tracks:
-
-- generation
-- best_fitness
-- mean_fitness
-- best_pipes
-- mean_pipes
-- best_frames
-- mean_frames
-- global_best_pipes
-- global_best_fitness
+The CSV tracks generation best, mean generation performance, validated global champion performance, and champion re-evaluation pipe stats.
 
 Generated `.npy`, `.png`, and `.csv` files are ignored by git.
 

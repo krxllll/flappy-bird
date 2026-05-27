@@ -9,6 +9,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from flappy_bird_ai.agent import BirdAgent  # noqa: E402
 from flappy_bird_ai.genetic import (  # noqa: E402
+    adapt_mutation_after_breakthrough,
     adaptive_mutation_strength,
     create_next_generation,
     is_better_result,
@@ -112,6 +113,13 @@ def test_global_best_comparison_prefers_pipes_then_fitness():
     assert not is_better_result(fewer_pipes_more_fitness, current_best)
 
 
+def test_global_best_comparison_prioritizes_pipes_over_raw_fitness():
+    current_best = {"pipes_passed": 4, "fitness": 50000.0}
+    candidate = {"pipes_passed": 5, "fitness": 10000.0}
+
+    assert is_better_result(candidate, current_best)
+
+
 def test_adaptive_mutation_strength_decreases_to_minimum():
     start_strength = adaptive_mutation_strength(
         generation_index=0,
@@ -137,6 +145,24 @@ def test_adaptive_mutation_strength_decreases_to_minimum():
     assert beyond_end_strength == 0.05
 
 
+def test_mutation_is_reduced_after_breakthrough_threshold():
+    unchanged_rate, unchanged_strength = adapt_mutation_after_breakthrough(
+        mutation_rate=0.15,
+        mutation_strength=0.12,
+        global_best_pipes=9,
+    )
+    reduced_rate, reduced_strength = adapt_mutation_after_breakthrough(
+        mutation_rate=0.15,
+        mutation_strength=0.12,
+        global_best_pipes=10,
+    )
+
+    assert unchanged_rate == 0.15
+    assert unchanged_strength == 0.12
+    assert reduced_rate == 0.08
+    assert reduced_strength == 0.05
+
+
 def test_elites_are_copied_and_not_mutated_in_place():
     population = np.array(
         [
@@ -158,3 +184,54 @@ def test_elites_are_copied_and_not_mutated_in_place():
     assert np.array_equal(next_generation[1], population[1])
     assert not np.shares_memory(next_generation[0], population[0])
     assert not np.shares_memory(next_generation[1], population[1])
+
+
+def test_global_best_is_injected_into_next_generation():
+    population = np.array(
+        [
+            np.full(5, 3.0),
+            np.full(5, 2.0),
+            np.full(5, 1.0),
+        ]
+    )
+    global_best = np.full(5, 99.0)
+
+    next_generation = create_next_generation(
+        population,
+        pop_size=5,
+        elite_size=1,
+        mutation_rate=0.0,
+        global_best_genome=global_best,
+        champion_offspring_ratio=0.0,
+    )
+
+    assert np.array_equal(next_generation[0], global_best)
+    assert not np.shares_memory(next_generation[0], global_best)
+
+
+def test_champion_offspring_are_copied_from_global_best_safely():
+    population = np.array(
+        [
+            np.full(5, 3.0),
+            np.full(5, 2.0),
+            np.full(5, 1.0),
+        ]
+    )
+    global_best = np.full(5, 42.0)
+
+    next_generation = create_next_generation(
+        population,
+        pop_size=6,
+        elite_size=0,
+        mutation_rate=0.0,
+        global_best_genome=global_best,
+        champion_offspring_ratio=0.5,
+    )
+
+    assert np.array_equal(next_generation[0], global_best)
+    assert np.array_equal(next_generation[1], global_best)
+    assert np.array_equal(next_generation[2], global_best)
+    assert np.array_equal(next_generation[3], global_best)
+
+    for index in range(4):
+        assert not np.shares_memory(next_generation[index], global_best)

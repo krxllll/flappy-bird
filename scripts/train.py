@@ -11,12 +11,15 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from flappy_bird_ai.agent import BirdAgent
 from flappy_bird_ai.genetic import (  # noqa: E402
+    CHAMPION_EVALUATION_EPISODES,
     EARLY_STOP_ON_TARGET,
     GENERATIONS,
+    MUTATION_RATE,
     POPULATION_SIZE,
     TARGET_PIPES,
     TOP_VALIDATION_COUNT,
     VALIDATION_EPISODES,
+    adapt_mutation_after_breakthrough,
     adaptive_mutation_strength,
     create_next_generation,
     initialize_population,
@@ -43,6 +46,9 @@ def save_training_history(history, path):
         "mean_frames",
         "global_best_pipes",
         "global_best_fitness",
+        "champion_mean_pipes",
+        "champion_max_pipes",
+        "champion_min_pipes",
     ]
 
     with path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -58,7 +64,7 @@ def save_progress_plots(history):
     plt.plot(
         generations,
         [row["best_fitness"] for row in history],
-        label="Best Fitness",
+        label="Generation Best Fitness",
         color="green",
         linewidth=2,
     )
@@ -68,6 +74,13 @@ def save_progress_plots(history):
         label="Mean Fitness",
         color="orange",
         linestyle="--",
+    )
+    plt.plot(
+        generations,
+        [row["global_best_fitness"] for row in history],
+        label="Validated Global Best Fitness",
+        color="blue",
+        linewidth=2,
     )
     plt.title("Flappy Bird Genetic Algorithm Fitness Progression")
     plt.xlabel("Generation")
@@ -82,7 +95,7 @@ def save_progress_plots(history):
     plt.plot(
         generations,
         [row["best_pipes"] for row in history],
-        label="Best Pipes",
+        label="Generation Best Pipes",
         color="blue",
         linewidth=2,
     )
@@ -92,6 +105,21 @@ def save_progress_plots(history):
         label="Mean Pipes",
         color="purple",
         linestyle="--",
+    )
+    plt.plot(
+        generations,
+        [row["global_best_pipes"] for row in history],
+        label="Validated Global Best Pipes",
+        color="green",
+        linewidth=2,
+    )
+    plt.plot(
+        generations,
+        [row["champion_mean_pipes"] for row in history],
+        label="Champion Re-eval Mean Pipes",
+        color="red",
+        linestyle=":",
+        linewidth=2,
     )
     plt.title("Flappy Bird Pipe Progression")
     plt.xlabel("Generation")
@@ -111,12 +139,29 @@ def summarize_results(results):
     }
 
 
+def summarize_champion_pipes(results):
+    pipes = [result["pipes_passed"] for result in results]
+    return {
+        "champion_mean_pipes": float(np.mean(pipes)),
+        "champion_max_pipes": int(np.max(pipes)),
+        "champion_min_pipes": int(np.min(pipes)),
+    }
+
+
 def validate_chromosome(chromosome, episodes=VALIDATION_EPISODES):
     results = [
         evaluate_chromosome(chromosome, render=False)
         for _ in range(episodes)
     ]
     return summarize_results(results)
+
+
+def evaluate_champion(chromosome, episodes=CHAMPION_EVALUATION_EPISODES):
+    results = [
+        evaluate_chromosome(chromosome, render=False)
+        for _ in range(episodes)
+    ]
+    return summarize_champion_pipes(results)
 
 
 def train_evolutionary_ai():
@@ -182,6 +227,14 @@ def train_evolutionary_ai():
         global_best_fitness = (
             global_best_result["fitness"] if global_best_result is not None else 0.0
         )
+        champion_stats = {
+            "champion_mean_pipes": 0.0,
+            "champion_max_pipes": 0,
+            "champion_min_pipes": 0,
+        }
+
+        if global_best_genome is not None:
+            champion_stats = evaluate_champion(global_best_genome)
 
         training_history.append(
             {
@@ -194,6 +247,7 @@ def train_evolutionary_ai():
                 "mean_frames": mean_frames,
                 "global_best_pipes": global_best_pipes,
                 "global_best_fitness": global_best_fitness,
+                **champion_stats,
             }
         )
 
@@ -202,23 +256,40 @@ def train_evolutionary_ai():
             f"Avg fitness: {mean_fit:.1f} | Best pipes: {best_pipes} | "
             f"Avg pipes: {mean_pipes:.1f} | Best frames: {best_frames} | "
             f"Global best pipes: {global_best_pipes:.2f} | "
-            f"Global best fitness: {global_best_fitness:.1f}"
+            f"Global best fitness: {global_best_fitness:.1f} | "
+            f"Champion pipes mean/max/min: "
+            f"{champion_stats['champion_mean_pipes']:.2f}/"
+            f"{champion_stats['champion_max_pipes']}/"
+            f"{champion_stats['champion_min_pipes']}"
         )
 
-        if global_best_result is not None and target_reached(global_best_result, TARGET_PIPES):
+        champion_target_result = {
+            "pipes_passed": champion_stats["champion_mean_pipes"],
+            "fitness": global_best_fitness,
+        }
+
+        if global_best_genome is not None and target_reached(champion_target_result, TARGET_PIPES):
             print(
-                "Target confirmed by validation: "
-                f"global best averaged {global_best_pipes:.2f} pipes"
+                "Target confirmed by champion re-evaluation: "
+                f"champion averaged {champion_stats['champion_mean_pipes']:.2f} pipes"
             )
 
             if EARLY_STOP_ON_TARGET:
                 break
 
         current_mutation_strength = adaptive_mutation_strength(g, GENERATIONS)
+        current_mutation_rate = MUTATION_RATE
+        current_mutation_rate, current_mutation_strength = adapt_mutation_after_breakthrough(
+            current_mutation_rate,
+            current_mutation_strength,
+            global_best_pipes,
+        )
         population = create_next_generation(
             population,
             pop_size=POPULATION_SIZE,
             mutation_strength=current_mutation_strength,
+            mutation_rate=current_mutation_rate,
+            global_best_genome=global_best_genome,
         )
 
     save_training_history(training_history, TRAINING_HISTORY_PATH)
