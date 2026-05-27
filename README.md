@@ -2,38 +2,45 @@
 
 This project trains a Flappy Bird agent with a genetic algorithm and a small feedforward neural network. Each bird is represented by one chromosome: a flat NumPy array containing all neural-network weights and biases.
 
-The neural network architecture is:
+The neural network architecture is unchanged:
 
 - 180 inputs
 - 16 hidden neurons
 - 1 output
 - 2913 chromosome parameters
 
-The output is converted into a binary action: flap or do nothing.
+The network output is converted into a binary action: flap or do nothing.
 
-## Neuroevolution Approach
+## Training Approach
 
-Training starts with a random population of birds. Each chromosome is evaluated by running one Flappy Bird game. After each generation, the best chromosomes are kept, selected parents are crossed over, and random mutations are applied to create the next generation.
+Training starts with a random population of birds. Each chromosome is evaluated by running one Flappy Bird game. After each generation, the population is sorted, copied elites are preserved, selected parents are crossed over, and mutation creates the rest of the next generation.
 
-Fitness now explicitly rewards both survival and pipe passing:
-
-```text
-fitness = frames_survived + pipes_passed * PIPE_REWARD
-```
-
-`PIPE_REWARD` is defined in `src/flappy_bird_ai/simulation.py` and is currently `1000.0`. Survival time still matters, but passing pipes is the strongest signal.
-
-## Pipe Target
-
-Training uses `TARGET_PIPES` from `src/flappy_bird_ai/genetic.py`. The default target is `10` pipes.
-
-At the end of each generation, the best bird is checked against this target. If the best bird reaches the target, training saves the genome and prints:
+Fitness is now pipe-first:
 
 ```text
-Target reached: best bird passed X pipes
+fitness = frames_survived + (pipes_passed ** 2) * PIPE_REWARD
 ```
 
-If `EARLY_STOP_ON_TARGET` is `True`, training stops immediately after the target is reached. Set it to `False` to keep training through all generations while still highlighting target success.
+`PIPE_REWARD` is defined in `src/flappy_bird_ai/simulation.py` and is currently `1000.0`. Frames still provide a small continuous reward, but passing more pipes is the main objective.
+
+## Hall Of Fame
+
+Training keeps a global best genome across all generations. This protects against the best discovered bird being lost when later generations perform worse.
+
+Global-best comparison uses:
+
+1. More pipes passed
+2. Higher fitness if pipe count is tied
+
+The file `outputs/best_bird_genome.npy` is saved only when the validated global best improves.
+
+## Validation And Target Pipes
+
+Normal population evaluation stays fast with one episode per bird. After each generation, the top candidates are re-evaluated for several validation episodes. This reduces the chance of saving a one-time lucky run as the champion.
+
+Training uses `TARGET_PIPES` from `src/flappy_bird_ai/genetic.py`. The default target is `10` pipes. If the validated global best reaches the target, training prints a confirmation message. If `EARLY_STOP_ON_TARGET` is `True`, training stops early only after validation confirms the target.
+
+Mutation strength is adaptive. It starts at `INITIAL_MUTATION_STRENGTH` and gradually cools down toward `MIN_MUTATION_STRENGTH` as generations progress.
 
 ## Project Structure
 
@@ -67,11 +74,21 @@ Training writes generated files into `outputs/`:
 - `outputs/fitness_progression.png`
 - `outputs/pipe_progression.png`
 
-The CSV tracks generation, best fitness, mean fitness, best pipes, mean pipes, best frames, and mean frames.
+The CSV tracks:
+
+- generation
+- best_fitness
+- mean_fitness
+- best_pipes
+- mean_pipes
+- best_frames
+- mean_frames
+- global_best_pipes
+- global_best_fitness
 
 Generated `.npy`, `.png`, and `.csv` files are ignored by git.
 
-## Setup on Windows PowerShell
+## Setup On Windows PowerShell
 
 Create a virtual environment:
 
@@ -79,7 +96,7 @@ Create a virtual environment:
 python -m venv .venv
 ```
 
-Activate the virtual environment:
+Activate it:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -122,4 +139,10 @@ Run tests:
 
 ```powershell
 pytest
+```
+
+If `pytest` is not on PATH, run it through the virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
 ```

@@ -11,14 +11,16 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from flappy_bird_ai.agent import BirdAgent
 from flappy_bird_ai.genetic import (  # noqa: E402
-    ELITE_SIZE,
     EARLY_STOP_ON_TARGET,
     GENERATIONS,
     POPULATION_SIZE,
     TARGET_PIPES,
-    crossover,
+    TOP_VALIDATION_COUNT,
+    VALIDATION_EPISODES,
+    adaptive_mutation_strength,
+    create_next_generation,
     initialize_population,
-    mutate,
+    is_better_result,
     target_reached,
 )
 from flappy_bird_ai.simulation import evaluate_chromosome  # noqa: E402
@@ -39,6 +41,8 @@ def save_training_history(history, path):
         "mean_pipes",
         "best_frames",
         "mean_frames",
+        "global_best_pipes",
+        "global_best_fitness",
     ]
 
     with path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -99,6 +103,22 @@ def save_progress_plots(history):
     plt.close()
 
 
+def summarize_results(results):
+    return {
+        "fitness": float(np.mean([result["fitness"] for result in results])),
+        "frames": float(np.mean([result["frames"] for result in results])),
+        "pipes_passed": float(np.mean([result["pipes_passed"] for result in results])),
+    }
+
+
+def validate_chromosome(chromosome, episodes=VALIDATION_EPISODES):
+    results = [
+        evaluate_chromosome(chromosome, render=False)
+        for _ in range(episodes)
+    ]
+    return summarize_results(results)
+
+
 def train_evolutionary_ai():
     agent_meta = BirdAgent()
     chrom_len = agent_meta.chromosome_length
@@ -108,12 +128,13 @@ def train_evolutionary_ai():
     population = initialize_population(POPULATION_SIZE, chrom_len)
 
     training_history = []
-    best_fitness_so_far = float("-inf")
+    global_best_genome = None
+    global_best_result = None
 
     print(
         "Starting evolutionary training. "
         f"Population: {POPULATION_SIZE} | Generations: {GENERATIONS} | "
-        f"Target pipes: {TARGET_PIPES}\n"
+        f"Target pipes: {TARGET_PIPES} | Validation episodes: {VALIDATION_EPISODES}\n"
     )
 
     for g in range(GENERATIONS):
@@ -141,6 +162,27 @@ def train_evolutionary_ai():
         best_frames = int(frame_scores[0])
         mean_frames = np.mean(frame_scores)
 
+        validation_count = min(TOP_VALIDATION_COUNT, POPULATION_SIZE)
+        for candidate_index in range(validation_count):
+            validation_result = validate_chromosome(population[candidate_index])
+
+            if is_better_result(validation_result, global_best_result):
+                global_best_result = validation_result
+                global_best_genome = population[candidate_index].copy()
+                np.save(BEST_GENOME_PATH, global_best_genome)
+                print(
+                    "New global best saved | "
+                    f"Validated pipes: {global_best_result['pipes_passed']:.2f} | "
+                    f"Validated fitness: {global_best_result['fitness']:.1f}"
+                )
+
+        global_best_pipes = (
+            global_best_result["pipes_passed"] if global_best_result is not None else 0.0
+        )
+        global_best_fitness = (
+            global_best_result["fitness"] if global_best_result is not None else 0.0
+        )
+
         training_history.append(
             {
                 "generation": g + 1,
@@ -150,41 +192,34 @@ def train_evolutionary_ai():
                 "mean_pipes": mean_pipes,
                 "best_frames": best_frames,
                 "mean_frames": mean_frames,
+                "global_best_pipes": global_best_pipes,
+                "global_best_fitness": global_best_fitness,
             }
         )
 
         print(
             f"Generation {g + 1:02d} | Best fitness: {best_fit:.1f} | "
             f"Avg fitness: {mean_fit:.1f} | Best pipes: {best_pipes} | "
-            f"Avg pipes: {mean_pipes:.1f} | Best frames: {best_frames}"
+            f"Avg pipes: {mean_pipes:.1f} | Best frames: {best_frames} | "
+            f"Global best pipes: {global_best_pipes:.2f} | "
+            f"Global best fitness: {global_best_fitness:.1f}"
         )
 
-        if best_fit > best_fitness_so_far:
-            best_fitness_so_far = best_fit
-            np.save(BEST_GENOME_PATH, population[0])
-
-        if target_reached(evaluation_results[0], TARGET_PIPES):
-            np.save(BEST_GENOME_PATH, population[0])
-            print(f"Target reached: best bird passed {best_pipes} pipes")
+        if global_best_result is not None and target_reached(global_best_result, TARGET_PIPES):
+            print(
+                "Target confirmed by validation: "
+                f"global best averaged {global_best_pipes:.2f} pipes"
+            )
 
             if EARLY_STOP_ON_TARGET:
                 break
 
-        next_generation = []
-
-        for e in range(ELITE_SIZE):
-            next_generation.append(population[e])
-
-        while len(next_generation) < POPULATION_SIZE:
-            parent_pool_idx = int(POPULATION_SIZE * 0.4)
-            p1_idx = np.random.randint(0, parent_pool_idx)
-            p2_idx = np.random.randint(0, parent_pool_idx)
-
-            child = crossover(population[p1_idx], population[p2_idx])
-            child = mutate(child)
-            next_generation.append(child)
-
-        population = np.array(next_generation)
+        current_mutation_strength = adaptive_mutation_strength(g, GENERATIONS)
+        population = create_next_generation(
+            population,
+            pop_size=POPULATION_SIZE,
+            mutation_strength=current_mutation_strength,
+        )
 
     save_training_history(training_history, TRAINING_HISTORY_PATH)
     save_progress_plots(training_history)

@@ -1,6 +1,7 @@
+import time
+
 import gymnasium as gym
 import flappy_bird_gymnasium  # noqa: F401
-import time
 
 from flappy_bird_ai.agent import BirdAgent
 
@@ -10,7 +11,7 @@ PIPE_REWARD = 1000.0
 
 def calculate_fitness(frames_survived, pipes_passed, pipe_reward=PIPE_REWARD):
     """Calculate fitness from survival time and completed pipes."""
-    return float(frames_survived + pipes_passed * pipe_reward)
+    return float(frames_survived + (pipes_passed**2) * pipe_reward)
 
 
 def evaluate_chromosome(chromosome, render=False, frame_delay=0.0):

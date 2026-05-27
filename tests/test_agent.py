@@ -8,7 +8,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from flappy_bird_ai.agent import BirdAgent  # noqa: E402
-from flappy_bird_ai.genetic import target_reached  # noqa: E402
+from flappy_bird_ai.genetic import (  # noqa: E402
+    adaptive_mutation_strength,
+    create_next_generation,
+    is_better_result,
+    target_reached,
+)
 from flappy_bird_ai.simulation import PIPE_REWARD, calculate_fitness  # noqa: E402
 
 
@@ -84,6 +89,72 @@ def test_fitness_increases_significantly_when_pipes_increase():
     assert one_pipe_fitness - no_pipe_fitness == PIPE_REWARD
 
 
+def test_higher_pipe_count_beats_higher_survival_time():
+    long_survival = calculate_fitness(frames_survived=5000, pipes_passed=1)
+    more_pipes = calculate_fitness(frames_survived=100, pipes_passed=3)
+
+    assert more_pipes > long_survival
+
+
 def test_target_pipe_threshold_detects_success():
     assert target_reached({"pipes_passed": 10}, target_pipes=10)
     assert not target_reached({"pipes_passed": 9}, target_pipes=10)
+
+
+def test_global_best_comparison_prefers_pipes_then_fitness():
+    current_best = {"pipes_passed": 2, "fitness": 9000.0}
+    more_pipes = {"pipes_passed": 3, "fitness": 4000.0}
+    same_pipes_more_fitness = {"pipes_passed": 2, "fitness": 9500.0}
+    fewer_pipes_more_fitness = {"pipes_passed": 1, "fitness": 20000.0}
+
+    assert is_better_result(more_pipes, current_best)
+    assert is_better_result(same_pipes_more_fitness, current_best)
+    assert not is_better_result(fewer_pipes_more_fitness, current_best)
+
+
+def test_adaptive_mutation_strength_decreases_to_minimum():
+    start_strength = adaptive_mutation_strength(
+        generation_index=0,
+        total_generations=50,
+        initial_strength=0.2,
+        min_strength=0.05,
+    )
+    late_strength = adaptive_mutation_strength(
+        generation_index=49,
+        total_generations=50,
+        initial_strength=0.2,
+        min_strength=0.05,
+    )
+    beyond_end_strength = adaptive_mutation_strength(
+        generation_index=100,
+        total_generations=50,
+        initial_strength=0.2,
+        min_strength=0.05,
+    )
+
+    assert start_strength == 0.2
+    assert late_strength < start_strength
+    assert beyond_end_strength == 0.05
+
+
+def test_elites_are_copied_and_not_mutated_in_place():
+    population = np.array(
+        [
+            np.full(5, 10.0),
+            np.full(5, 5.0),
+            np.full(5, 1.0),
+            np.full(5, -1.0),
+        ]
+    )
+
+    next_generation = create_next_generation(
+        population,
+        pop_size=4,
+        elite_size=2,
+        mutation_strength=1.0,
+    )
+
+    assert np.array_equal(next_generation[0], population[0])
+    assert np.array_equal(next_generation[1], population[1])
+    assert not np.shares_memory(next_generation[0], population[0])
+    assert not np.shares_memory(next_generation[1], population[1])
