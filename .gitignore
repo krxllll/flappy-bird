@@ -1,0 +1,9 @@
+.venv/
+.idea/
+__pycache__/
+.pytest_cache/
+*.pyc
+outputs/*.npy
+outputs/*.png
+outputs/*.csv
+!outputs/.gitkeep
