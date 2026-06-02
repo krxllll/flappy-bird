@@ -7,11 +7,17 @@ from flappy_bird_ai.agent import BirdAgent
 
 
 PIPE_REWARD = 1000.0
+PIPE_EXPONENT = 1.5
 
 
-def calculate_fitness(frames_survived, pipes_passed, pipe_reward=PIPE_REWARD):
+def calculate_fitness(
+    frames_survived,
+    pipes_passed,
+    pipe_reward=PIPE_REWARD,
+    pipe_exponent=PIPE_EXPONENT,
+):
     """Calculate fitness from survival time and completed pipes."""
-    return float(frames_survived + (pipes_passed**2) * pipe_reward)
+    return float(frames_survived + (pipes_passed**pipe_exponent) * pipe_reward)
 
 
 def evaluate_chromosome(chromosome, render=False, frame_delay=0.0):

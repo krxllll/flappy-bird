@@ -18,14 +18,14 @@ Normal population evaluation stays fast: each chromosome plays one episode. Gene
 Fitness is pipe-first:
 
 ```text
-fitness = frames_survived + (pipes_passed ** 2) * PIPE_REWARD
+fitness = frames_survived + (pipes_passed ** PIPE_EXPONENT) * PIPE_REWARD
 ```
 
-`PIPE_REWARD` is defined in `src/flappy_bird_ai/simulation.py` and is currently `1000.0`.
+`PIPE_REWARD` and `PIPE_EXPONENT` are defined in `src/flappy_bird_ai/simulation.py`. The default exponent is `1.5`, which keeps pipe passing important while reducing extreme single-run fitness spikes.
 
 ## Validation-Based Champion Selection
 
-The saved champion is never chosen from a single lucky generation run. Top candidates that can match or beat the current champion are re-evaluated with `VALIDATION_EPISODES = 10`.
+The saved champion is never chosen from a single lucky generation run. Top candidates that can match or beat the current champion are re-evaluated with `VALIDATION_EPISODES = 20`.
 
 Validated champion stats include:
 
@@ -39,21 +39,28 @@ Validated champion stats include:
 The champion score rewards consistency:
 
 ```text
-champion_score = validated_mean_pipes + 0.3 * validated_min_pipes - 0.1 * validated_std_pipes
+champion_score = validated_mean_pipes + validated_min_pipes - 0.3 * validated_std_pipes
 ```
 
-Global champion comparison prioritizes validated mean pipes first, then uses the stability-aware champion score and validated mean fitness as tie-breakers. `outputs/best_bird_genome.npy` is saved only when validation confirms improvement.
+Global champion comparison uses this stability-aware score first, then validated mean fitness as a tie-breaker. `outputs/best_bird_genome.npy` is saved only when validation confirms improvement.
 
 ## Population Stability
 
 Every new generation includes:
 
 - The validated global best copied unchanged.
-- About 30% small mutations of the global best.
+- About 35% conservative small mutations of the global best.
 - Most remaining birds from crossover among top candidates.
 - About 10% random new chromosomes for diversity.
 
 Elites and the global best are copied with `.copy()` so they are not mutated accidentally.
+
+Champion offspring use smaller mutation settings than normal offspring:
+
+```text
+CHAMPION_MUTATION_RATE = 0.03
+CHAMPION_MUTATION_STRENGTH = 0.02
+```
 
 ## Adaptive Mutation
 
@@ -66,6 +73,8 @@ mutation_strength = min(current_mutation_strength, 0.03)
 
 This keeps exploration early and makes late-stage improvements less destructive.
 
+If the champion does not improve for several generations, patience-based diversity slightly increases the random-agent ratio and normal mutation strength. When the champion improves, the patience counter resets and normal adaptive settings resume.
+
 ## Outputs
 
 Training writes generated files into `outputs/`:
@@ -75,7 +84,7 @@ Training writes generated files into `outputs/`:
 - `outputs/fitness_progression.png`
 - `outputs/pipe_progression.png`
 
-The CSV includes raw generation metrics, validated champion metrics, champion score, mutation rate, and mutation strength. Plots include raw best/mean lines plus 5-generation moving averages.
+The CSV includes raw generation metrics, revalidated generation best fitness, validated champion metrics, champion score, patience count, mutation rate, mutation strength, champion offspring ratio, and random-agent ratio. Plots include raw best/mean lines plus 5-generation moving averages, with raw generation best fitness shown as a secondary spike-prone metric.
 
 Generated `.npy`, `.png`, and `.csv` files are ignored by git.
 
