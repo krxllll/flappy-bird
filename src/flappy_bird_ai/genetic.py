@@ -10,14 +10,24 @@ MUTATION_STRENGTH = INITIAL_MUTATION_STRENGTH
 ELITE_SIZE = 5
 TARGET_PIPES = 10
 EARLY_STOP_ON_TARGET = True
-TOP_VALIDATION_COUNT = 5
-VALIDATION_EPISODES = 10
-CHAMPION_EVALUATION_EPISODES = 10
-CHAMPION_OFFSPRING_RATIO = 0.3
+TOP_VALIDATION_COUNT = 10
+GENERATION_BEST_REEVALUATION_COUNT = 10
+GENERATION_BEST_REEVALUATION_EPISODES = 3
+VALIDATION_EPISODES = 20
+CHAMPION_EVALUATION_EPISODES = 20
+CHAMPION_OFFSPRING_RATIO = 0.35
+CHAMPION_MUTATION_RATE = 0.03
+CHAMPION_MUTATION_STRENGTH = 0.02
 RANDOM_IMMIGRANT_RATIO = 0.1
 BREAKTHROUGH_PIPES = 10
 POST_BREAKTHROUGH_MUTATION_RATE = 0.05
 POST_BREAKTHROUGH_MUTATION_STRENGTH = 0.03
+PATIENCE_GENERATIONS = 15
+PATIENCE_RANDOM_IMMIGRANT_RATIO = 0.25
+PATIENCE_MUTATION_RATE = 0.20
+PATIENCE_MUTATION_STRENGTH_MULTIPLIER = 1.25
+PATIENCE_WEAK_CHAMPION_PIPES = 5
+PATIENCE_WEAK_CHAMPION_OFFSPRING_RATIO = 0.10
 
 
 def initialize_population(pop_size, chromosome_length):
@@ -71,11 +81,64 @@ def calculate_champion_score(
     validated_min_pipes,
     validated_std_pipes,
 ):
-    """Score champion consistency while keeping mean pipes dominant."""
+    """Score champion consistency as a secondary tie-breaker."""
     return float(
         validated_mean_pipes
         + 0.3 * validated_min_pipes
         - 0.1 * validated_std_pipes
+    )
+
+
+def apply_patience_diversity(
+    mutation_rate,
+    mutation_strength,
+    random_immigrant_ratio,
+    champion_offspring_ratio,
+    generations_without_improvement,
+    validated_mean_pipes=0.0,
+    patience_generations=PATIENCE_GENERATIONS,
+):
+    """Increase diversity after a long champion-improvement plateau."""
+    if generations_without_improvement < patience_generations:
+        return mutation_rate, mutation_strength, random_immigrant_ratio, champion_offspring_ratio
+
+    mutation_rate = max(mutation_rate, PATIENCE_MUTATION_RATE)
+    mutation_strength = mutation_strength * PATIENCE_MUTATION_STRENGTH_MULTIPLIER
+    random_immigrant_ratio = max(random_immigrant_ratio, PATIENCE_RANDOM_IMMIGRANT_RATIO)
+
+    if validated_mean_pipes < PATIENCE_WEAK_CHAMPION_PIPES:
+        champion_offspring_ratio = min(
+            champion_offspring_ratio,
+            PATIENCE_WEAK_CHAMPION_OFFSPRING_RATIO,
+        )
+
+    return (
+        mutation_rate,
+        mutation_strength,
+        random_immigrant_ratio,
+        champion_offspring_ratio,
+    )
+
+
+def get_champion_offspring_ratio(validated_mean_pipes):
+    """Use less champion cloning until the champion is actually strong."""
+    if validated_mean_pipes >= 10:
+        return 0.35
+    if validated_mean_pipes >= 5:
+        return 0.25
+    return 0.15
+
+
+def sort_population_indices(evaluation_results):
+    """Rank candidates by pipes first, then fitness, then frames."""
+    return sorted(
+        range(len(evaluation_results)),
+        key=lambda i: (
+            evaluation_results[i]["pipes_passed"],
+            evaluation_results[i]["fitness"],
+            evaluation_results[i]["frames"],
+        ),
+        reverse=True,
     )
 
 
@@ -89,6 +152,8 @@ def create_next_generation(
     global_best_genome=None,
     champion_offspring_ratio=CHAMPION_OFFSPRING_RATIO,
     random_immigrant_ratio=RANDOM_IMMIGRANT_RATIO,
+    champion_mutation_rate=CHAMPION_MUTATION_RATE,
+    champion_mutation_strength=CHAMPION_MUTATION_STRENGTH,
 ):
     """Create a new generation while preserving elites and the champion."""
     next_generation = []
@@ -110,8 +175,8 @@ def create_next_generation(
             champion_child = global_best_genome.copy()
             champion_child = mutate(
                 champion_child,
-                mutation_strength=mutation_strength,
-                mutation_rate=mutation_rate,
+                mutation_strength=champion_mutation_strength,
+                mutation_rate=champion_mutation_rate,
             )
             next_generation.append(champion_child)
 
@@ -143,7 +208,7 @@ def create_next_generation(
 
 
 def is_better_result(candidate, current_best):
-    """Compare validated champions by mean pipes, consistency, then fitness."""
+    """Compare validated champions by mean pipes, stability, then fitness."""
     if current_best is None:
         return True
 

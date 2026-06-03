@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.6.0
+
+Training balance and exploration recovery update.
+
+- Changed pipe-reward shaping to use configurable `PIPE_EXPONENT` with a default of `1.75`.
+- Updated population ranking to sort candidates by pipes passed first, then fitness, then frames survived.
+- Moved `sort_population_indices` into `src/flappy_bird_ai/genetic.py` so tests and training use reusable GA logic instead of importing from `scripts`.
+- Increased the validation candidate pool from 5 to 10 top candidates.
+- Added 3-episode revalidation for the top 10 generation candidates before logging generation-best metrics.
+- Kept raw generation best fitness as a secondary spike-prone metric while logging revalidated generation best fitness separately.
+- Increased champion validation and champion re-evaluation to 20 episodes.
+- Preserved pipe-first champion comparison using validated mean pipes, champion score, then validated mean fitness.
+- Kept champion score as a mild stability tie-breaker using mean pipes, minimum pipes, and pipe standard deviation.
+- Added dynamic champion offspring ratios: lower ratios for weak champions and higher ratios after stronger validated pipe performance.
+- Added conservative champion-offspring mutation settings separate from normal offspring mutation.
+- Added patience-based exploration when champion improvement stalls, increasing mutation rate, mutation strength, and random immigrants while reducing champion offspring for weak champions.
+- Extended CSV logging with pipe exponent, raw and revalidated generation best fitness, patience count, champion offspring ratio, and random immigrant ratio.
+- Updated plots so raw generation best fitness is visually secondary and moving-average/revalidated metrics remain prominent.
+- Expanded tests for pipe-first sorting, pipe exponent, champion comparison priority, dynamic champion offspring ratios, patience diversity, and safe champion offspring mutation.
+
 ## v0.5.0
 
 Training stability and validated champion selection update.
@@ -70,4 +90,3 @@ Project restructuring and baseline neuroevolution setup.
 - Added `.gitignore` rules for `.venv`, cache files, generated genomes, plots, and CSV logs.
 - Added a sanity check script for the Flappy Bird Gymnasium environment.
 - Added baseline tests for chromosome length, chromosome-to-weight mapping, and binary action prediction.
-
