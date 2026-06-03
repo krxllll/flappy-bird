@@ -7,13 +7,18 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from flappy_bird_ai.simulation import evaluate_chromosome  # noqa: E402
+from flappy_bird_ai.simulation import (  # noqa: E402
+    evaluate_chromosome,
+    suppress_gymnasium_observation_warnings,
+)
 
 
 BEST_GENOME_PATH = PROJECT_ROOT / "outputs" / "best_bird_genome.npy"
 
 
 def watch_best_bird():
+    suppress_gymnasium_observation_warnings()
+
     print("Loading the ultimate champion bird genome...")
     try:
         best_chromosome = np.load(BEST_GENOME_PATH)
