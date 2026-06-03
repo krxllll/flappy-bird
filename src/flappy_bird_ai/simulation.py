@@ -7,7 +7,7 @@ from flappy_bird_ai.agent import BirdAgent
 
 
 PIPE_REWARD = 1000.0
-PIPE_EXPONENT = 1.5
+PIPE_EXPONENT = 1.75
 
 
 def calculate_fitness(

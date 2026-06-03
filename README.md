@@ -39,10 +39,10 @@ Validated champion stats include:
 The champion score rewards consistency:
 
 ```text
-champion_score = validated_mean_pipes + validated_min_pipes - 0.3 * validated_std_pipes
+champion_score = validated_mean_pipes + 0.3 * validated_min_pipes - 0.1 * validated_std_pipes
 ```
 
-Global champion comparison uses this stability-aware score first, then validated mean fitness as a tie-breaker. `outputs/best_bird_genome.npy` is saved only when validation confirms improvement.
+Global champion comparison prioritizes validated mean pipes first, then uses this stability-aware score as a tie-breaker, then validated mean fitness as the final tie-breaker. `outputs/best_bird_genome.npy` is saved only when validation confirms improvement.
 
 ## Population Stability
 

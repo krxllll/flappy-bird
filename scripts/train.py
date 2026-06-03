@@ -12,7 +12,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from flappy_bird_ai.agent import BirdAgent
 from flappy_bird_ai.genetic import (  # noqa: E402
     CHAMPION_EVALUATION_EPISODES,
-    CHAMPION_OFFSPRING_RATIO,
     EARLY_STOP_ON_TARGET,
     GENERATIONS,
     GENERATION_BEST_REEVALUATION_COUNT,
@@ -28,11 +27,13 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     apply_patience_diversity,
     calculate_champion_score,
     create_next_generation,
+    get_champion_offspring_ratio,
     initialize_population,
     is_better_result,
+    sort_population_indices,
     target_reached,
 )
-from flappy_bird_ai.simulation import evaluate_chromosome  # noqa: E402
+from flappy_bird_ai.simulation import PIPE_EXPONENT, evaluate_chromosome  # noqa: E402
 
 
 BEST_GENOME_PATH = PROJECT_ROOT / "outputs" / "best_bird_genome.npy"
@@ -63,6 +64,7 @@ def save_training_history(history, path):
         "mutation_strength",
         "champion_offspring_ratio",
         "random_immigrant_ratio",
+        "pipe_exponent",
     ]
 
     with path.open("w", newline="", encoding="utf-8") as csv_file:
@@ -286,16 +288,12 @@ def train_evolutionary_ai():
             result = evaluate_chromosome(population[i], render=False)
             evaluation_results.append(result)
 
+        sorted_indices = sort_population_indices(evaluation_results)
+        population = population[sorted_indices]
+        evaluation_results = [evaluation_results[idx] for idx in sorted_indices]
         fitness_scores = np.array([result["fitness"] for result in evaluation_results])
         pipes_scores = np.array([result["pipes_passed"] for result in evaluation_results])
         frame_scores = np.array([result["frames"] for result in evaluation_results])
-
-        sorted_indices = np.argsort(fitness_scores)[::-1]
-        population = population[sorted_indices]
-        fitness_scores = fitness_scores[sorted_indices]
-        pipes_scores = pipes_scores[sorted_indices]
-        frame_scores = frame_scores[sorted_indices]
-        evaluation_results = [evaluation_results[idx] for idx in sorted_indices]
 
         raw_best_fit = fitness_scores[0]
         mean_fit = np.mean(fitness_scores)
@@ -377,10 +375,19 @@ def train_evolutionary_ai():
             breakthrough_pipes,
         )
         current_random_immigrant_ratio = RANDOM_IMMIGRANT_RATIO
-        current_mutation_strength, current_random_immigrant_ratio = apply_patience_diversity(
+        current_champion_offspring_ratio = get_champion_offspring_ratio(breakthrough_pipes)
+        (
+            current_mutation_rate,
             current_mutation_strength,
             current_random_immigrant_ratio,
+            current_champion_offspring_ratio,
+        ) = apply_patience_diversity(
+            current_mutation_rate,
+            current_mutation_strength,
+            current_random_immigrant_ratio,
+            current_champion_offspring_ratio,
             generations_without_champion_improvement,
+            breakthrough_pipes,
         )
 
         training_history.append(
@@ -398,8 +405,9 @@ def train_evolutionary_ai():
                 "generations_without_champion_improvement": generations_without_champion_improvement,
                 "mutation_rate": current_mutation_rate,
                 "mutation_strength": current_mutation_strength,
-                "champion_offspring_ratio": CHAMPION_OFFSPRING_RATIO,
+                "champion_offspring_ratio": current_champion_offspring_ratio,
                 "random_immigrant_ratio": current_random_immigrant_ratio,
+                "pipe_exponent": PIPE_EXPONENT,
             }
         )
 
@@ -416,6 +424,7 @@ def train_evolutionary_ai():
             f"Champion score: {validated_stats['champion_score']:.2f} | "
             f"Patience: {generations_without_champion_improvement} | "
             f"Mutation: {current_mutation_rate:.3f}/{current_mutation_strength:.3f} | "
+            f"Champion offspring: {current_champion_offspring_ratio:.2f} | "
             f"Random ratio: {current_random_immigrant_ratio:.2f}"
         )
 
@@ -435,7 +444,7 @@ def train_evolutionary_ai():
             mutation_strength=current_mutation_strength,
             mutation_rate=current_mutation_rate,
             global_best_genome=global_best_genome,
-            champion_offspring_ratio=CHAMPION_OFFSPRING_RATIO,
+            champion_offspring_ratio=current_champion_offspring_ratio,
             random_immigrant_ratio=current_random_immigrant_ratio,
         )
 

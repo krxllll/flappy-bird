@@ -14,7 +14,9 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     apply_patience_diversity,
     calculate_champion_score,
     create_next_generation,
+    get_champion_offspring_ratio,
     is_better_result,
+    sort_population_indices,
     target_reached,
 )
 from flappy_bird_ai.simulation import PIPE_EXPONENT, PIPE_REWARD, calculate_fitness  # noqa: E402
@@ -100,8 +102,8 @@ def test_fitness_uses_configurable_pipe_exponent():
         pipe_exponent=PIPE_EXPONENT,
     )
 
-    assert PIPE_EXPONENT == 1.5
-    assert fitness == 100 + (4**1.5) * 1000
+    assert PIPE_EXPONENT == 1.75
+    assert fitness == 100 + (4**1.75) * 1000
 
 
 def test_higher_pipe_count_beats_higher_survival_time():
@@ -118,31 +120,60 @@ def test_target_pipe_threshold_detects_success():
     assert not target_reached({"validated_mean_pipes": 9.9}, target_pipes=10)
 
 
-def test_global_best_comparison_prefers_champion_score_then_fitness():
+def test_champion_comparison_prioritizes_validated_mean_pipes():
     current_best = {
-        "validated_mean_pipes": 2.0,
-        "validated_mean_fitness": 9000.0,
-        "champion_score": 2.0,
+        "validated_mean_pipes": 4.0,
+        "validated_mean_fitness": 25000.0,
+        "champion_score": 4.8,
     }
-    higher_score = {
-        "validated_mean_pipes": 3.0,
-        "validated_mean_fitness": 4000.0,
-        "champion_score": 2.5,
-    }
-    same_score_more_fitness = {
-        "validated_mean_pipes": 2.0,
-        "validated_mean_fitness": 9500.0,
-        "champion_score": 2.0,
-    }
-    lower_score_more_fitness = {
+    candidate = {
         "validated_mean_pipes": 5.0,
         "validated_mean_fitness": 20000.0,
-        "champion_score": 1.5,
+        "champion_score": 4.2,
     }
 
-    assert is_better_result(higher_score, current_best)
-    assert is_better_result(same_score_more_fitness, current_best)
-    assert not is_better_result(lower_score_more_fitness, current_best)
+    assert is_better_result(candidate, current_best)
+
+
+def test_population_sorting_prioritizes_pipes_over_fitness():
+    evaluation_results = [
+        {"pipes_passed": 1, "fitness": 50000.0, "frames": 900},
+        {"pipes_passed": 3, "fitness": 10000.0, "frames": 200},
+        {"pipes_passed": 3, "fitness": 11000.0, "frames": 100},
+        {"pipes_passed": 3, "fitness": 11000.0, "frames": 300},
+    ]
+
+    assert sort_population_indices(evaluation_results) == [3, 2, 1, 0]
+
+
+def test_champion_score_breaks_ties_for_equal_mean_pipes():
+    current_best = {
+        "validated_mean_pipes": 5.0,
+        "validated_mean_fitness": 25000.0,
+        "champion_score": 4.8,
+    }
+    candidate = {
+        "validated_mean_pipes": 5.0,
+        "validated_mean_fitness": 20000.0,
+        "champion_score": 5.1,
+    }
+
+    assert is_better_result(candidate, current_best)
+
+
+def test_validated_mean_fitness_is_tertiary_tiebreaker():
+    current_best = {
+        "validated_mean_pipes": 5.0,
+        "validated_mean_fitness": 20000.0,
+        "champion_score": 5.1,
+    }
+    candidate = {
+        "validated_mean_pipes": 5.0,
+        "validated_mean_fitness": 22000.0,
+        "champion_score": 5.1,
+    }
+
+    assert is_better_result(candidate, current_best)
 
 
 def test_champion_comparison_prefers_stable_higher_min_pipes():
@@ -200,6 +231,21 @@ def test_lucky_high_max_low_mean_candidate_does_not_replace_stable_champion():
     assert not is_better_result(lucky, stable)
 
 
+def test_stable_low_pipe_candidate_does_not_replace_higher_pipe_champion():
+    higher_pipe_champion = {
+        "validated_mean_pipes": 6.0,
+        "validated_mean_fitness": 10000.0,
+        "champion_score": 5.0,
+    }
+    stable_low_pipe_candidate = {
+        "validated_mean_pipes": 5.0,
+        "validated_mean_fitness": 30000.0,
+        "champion_score": 8.0,
+    }
+
+    assert not is_better_result(stable_low_pipe_candidate, higher_pipe_champion)
+
+
 def test_adaptive_mutation_strength_decreases_to_minimum():
     start_strength = adaptive_mutation_strength(
         generation_index=0,
@@ -244,21 +290,47 @@ def test_mutation_is_reduced_after_breakthrough_threshold():
 
 
 def test_patience_logic_increases_diversity_after_no_improvement():
-    normal_strength, normal_random_ratio = apply_patience_diversity(
+    (
+        normal_rate,
+        normal_strength,
+        normal_random_ratio,
+        normal_champion_ratio,
+    ) = apply_patience_diversity(
+        mutation_rate=0.15,
         mutation_strength=0.05,
         random_immigrant_ratio=0.1,
+        champion_offspring_ratio=0.15,
         generations_without_improvement=14,
+        validated_mean_pipes=3.0,
     )
-    boosted_strength, boosted_random_ratio = apply_patience_diversity(
+    (
+        boosted_rate,
+        boosted_strength,
+        boosted_random_ratio,
+        boosted_champion_ratio,
+    ) = apply_patience_diversity(
+        mutation_rate=0.15,
         mutation_strength=0.05,
         random_immigrant_ratio=0.1,
+        champion_offspring_ratio=0.15,
         generations_without_improvement=15,
+        validated_mean_pipes=3.0,
     )
 
+    assert normal_rate == 0.15
     assert normal_strength == 0.05
     assert normal_random_ratio == 0.1
+    assert normal_champion_ratio == 0.15
+    assert boosted_rate == 0.20
     assert boosted_strength > normal_strength
     assert boosted_random_ratio > normal_random_ratio
+    assert boosted_champion_ratio == 0.10
+
+
+def test_dynamic_champion_offspring_ratio_is_lower_for_weak_champions():
+    assert get_champion_offspring_ratio(2.0) == 0.15
+    assert get_champion_offspring_ratio(5.0) == 0.25
+    assert get_champion_offspring_ratio(10.0) == 0.35
 
 
 def test_elites_are_copied_and_not_mutated_in_place():
