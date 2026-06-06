@@ -1,5 +1,9 @@
+import argparse
+from concurrent.futures import ProcessPoolExecutor
 import csv
+import os
 import sys
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -33,7 +37,13 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     sort_population_indices,
     target_reached,
 )
-from flappy_bird_ai.simulation import PIPE_EXPONENT, evaluate_chromosome  # noqa: E402
+from flappy_bird_ai.simulation import (  # noqa: E402
+    PIPE_EXPONENT,
+    evaluate_chromosome_many,
+    evaluate_population,
+    reevaluate_candidates,
+    suppress_gymnasium_observation_warnings,
+)
 
 
 BEST_GENOME_PATH = PROJECT_ROOT / "outputs" / "best_bird_genome.npy"
@@ -228,30 +238,48 @@ def moving_average(values, window=5):
     return averaged
 
 
-def validate_chromosome(chromosome, episodes=VALIDATION_EPISODES):
-    results = [
-        evaluate_chromosome(chromosome, render=False)
-        for _ in range(episodes)
-    ]
+def validate_chromosome(
+    chromosome,
+    episodes=VALIDATION_EPISODES,
+    workers=1,
+    executor=None,
+):
+    results = evaluate_chromosome_many(
+        chromosome,
+        episodes=episodes,
+        workers=workers,
+        executor=executor,
+    )
     return summarize_results(results)
 
 
 def reevaluate_generation_candidate(
     chromosome,
     episodes=GENERATION_BEST_REEVALUATION_EPISODES,
+    workers=1,
+    executor=None,
 ):
-    results = [
-        evaluate_chromosome(chromosome, render=False)
-        for _ in range(episodes)
-    ]
+    results = evaluate_chromosome_many(
+        chromosome,
+        episodes=episodes,
+        workers=workers,
+        executor=executor,
+    )
     return summarize_generation_results(results)
 
 
-def evaluate_champion(chromosome, episodes=CHAMPION_EVALUATION_EPISODES):
-    results = [
-        evaluate_chromosome(chromosome, render=False)
-        for _ in range(episodes)
-    ]
+def evaluate_champion(
+    chromosome,
+    episodes=CHAMPION_EVALUATION_EPISODES,
+    workers=1,
+    executor=None,
+):
+    results = evaluate_chromosome_many(
+        chromosome,
+        episodes=episodes,
+        workers=workers,
+        executor=executor,
+    )
     return summarize_results(results)
 
 
@@ -262,7 +290,48 @@ def should_validate_candidate(candidate_result, current_best):
     return candidate_result["pipes_passed"] >= current_best["validated_mean_pipes"]
 
 
-def train_evolutionary_ai():
+def default_worker_count():
+    return max(1, (os.cpu_count() or 1) - 1)
+
+
+def resolve_worker_count(requested_workers=None, no_parallel=False):
+    if no_parallel:
+        return 1
+    if requested_workers is None:
+        return default_worker_count()
+    return max(1, requested_workers)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train the Flappy Bird GA agent.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Number of worker processes for population evaluation.",
+    )
+    parser.add_argument(
+        "--no-parallel",
+        action="store_true",
+        help="Disable multiprocessing and evaluate population sequentially.",
+    )
+    parser.add_argument(
+        "--generations",
+        type=int,
+        default=None,
+        help="Number of generations to train. Defaults to the configured value.",
+    )
+    return parser.parse_args()
+
+
+def train_evolutionary_ai(workers=None, generations=None):
+    suppress_gymnasium_observation_warnings()
+
+    if workers is None:
+        workers = default_worker_count()
+    if generations is None:
+        generations = GENERATIONS
+
     agent_meta = BirdAgent()
     chrom_len = agent_meta.chromosome_length
 
@@ -274,179 +343,267 @@ def train_evolutionary_ai():
     global_best_genome = None
     global_best_result = None
     generations_without_champion_improvement = 0
+    total_start_time = time.perf_counter()
 
     print(
         "Starting evolutionary training. "
-        f"Population: {POPULATION_SIZE} | Generations: {GENERATIONS} | "
+        f"Population: {POPULATION_SIZE} | Generations: {generations} | "
         f"Target pipes: {TARGET_PIPES} | Validation episodes: {VALIDATION_EPISODES}\n"
     )
+    print(
+        "Population evaluation: "
+        f"{'parallel' if workers > 1 else 'sequential'} using {workers} worker(s)\n"
+    )
 
-    for g in range(GENERATIONS):
-        evaluation_results = []
-
-        for i in range(POPULATION_SIZE):
-            result = evaluate_chromosome(population[i], render=False)
-            evaluation_results.append(result)
-
-        sorted_indices = sort_population_indices(evaluation_results)
-        population = population[sorted_indices]
-        evaluation_results = [evaluation_results[idx] for idx in sorted_indices]
-        fitness_scores = np.array([result["fitness"] for result in evaluation_results])
-        pipes_scores = np.array([result["pipes_passed"] for result in evaluation_results])
-        frame_scores = np.array([result["frames"] for result in evaluation_results])
-
-        raw_best_fit = fitness_scores[0]
-        mean_fit = np.mean(fitness_scores)
-        raw_best_pipes = int(pipes_scores[0])
-        mean_pipes = np.mean(pipes_scores)
-        raw_best_frames = int(frame_scores[0])
-        mean_frames = np.mean(frame_scores)
-
-        revalidation_count = min(GENERATION_BEST_REEVALUATION_COUNT, POPULATION_SIZE)
-        revalidated_generation_results = [
-            reevaluate_generation_candidate(population[candidate_index])
-            for candidate_index in range(revalidation_count)
-        ]
-        generation_best_result = max(
-            revalidated_generation_results,
-            key=lambda result: (result["pipes_passed"], result["fitness"]),
+    executor = None
+    if workers > 1:
+        executor = ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=suppress_gymnasium_observation_warnings,
         )
 
-        best_fit = generation_best_result["fitness"]
-        best_pipes = generation_best_result["pipes_passed"]
-        best_frames = generation_best_result["frames"]
+    try:
+        for g in range(generations):
+            generation_start_time = time.perf_counter()
+            population_eval_start_time = time.perf_counter()
+            evaluation_results = evaluate_population(
+                population,
+                workers=workers,
+                executor=executor,
+            )
+            population_eval_time = time.perf_counter() - population_eval_start_time
 
-        current_mutation_strength = adaptive_mutation_strength(g, GENERATIONS)
-        current_mutation_rate = MUTATION_RATE
-        champion_improved = False
+            sorted_indices = sort_population_indices(evaluation_results)
+            population = population[sorted_indices]
+            evaluation_results = [evaluation_results[idx] for idx in sorted_indices]
+            fitness_scores = np.array([result["fitness"] for result in evaluation_results])
+            pipes_scores = np.array([result["pipes_passed"] for result in evaluation_results])
+            frame_scores = np.array([result["frames"] for result in evaluation_results])
 
-        validation_count = min(TOP_VALIDATION_COUNT, POPULATION_SIZE)
-        for candidate_index in range(validation_count):
-            if not should_validate_candidate(evaluation_results[candidate_index], global_best_result):
-                continue
+            raw_best_fit = fitness_scores[0]
+            mean_fit = np.mean(fitness_scores)
+            raw_best_pipes = int(pipes_scores[0])
+            mean_pipes = np.mean(pipes_scores)
+            raw_best_frames = int(frame_scores[0])
+            mean_frames = np.mean(frame_scores)
 
-            validation_result = validate_chromosome(population[candidate_index])
-
-            if is_better_result(validation_result, global_best_result):
-                global_best_result = validation_result
-                global_best_genome = population[candidate_index].copy()
-                champion_improved = True
-                np.save(BEST_GENOME_PATH, global_best_genome)
-                print(
-                    "New global best saved | "
-                    f"Validated mean pipes: {global_best_result['validated_mean_pipes']:.2f} | "
-                    f"Validated fitness: {global_best_result['validated_mean_fitness']:.1f} | "
-                    f"Champion score: {global_best_result['champion_score']:.2f}"
-                )
-
-        validated_stats = {
-            "validated_mean_pipes": 0.0,
-            "validated_min_pipes": 0,
-            "validated_max_pipes": 0,
-            "validated_std_pipes": 0.0,
-            "validated_mean_fitness": 0.0,
-            "champion_score": 0.0,
-        }
-
-        if global_best_genome is not None:
-            champion_result = evaluate_champion(global_best_genome)
-
-            if is_better_result(champion_result, global_best_result):
-                global_best_result = champion_result
-                global_best_genome = global_best_genome.copy()
-                champion_improved = True
-                np.save(BEST_GENOME_PATH, global_best_genome)
-
-            validated_stats = champion_result
-
-        if champion_improved:
-            generations_without_champion_improvement = 0
-        else:
-            generations_without_champion_improvement += 1
-
-        breakthrough_pipes = (
-            global_best_result["validated_mean_pipes"]
-            if global_best_result is not None
-            else 0.0
-        )
-        current_mutation_rate, current_mutation_strength = adapt_mutation_after_breakthrough(
-            current_mutation_rate,
-            current_mutation_strength,
-            breakthrough_pipes,
-        )
-        current_random_immigrant_ratio = RANDOM_IMMIGRANT_RATIO
-        current_champion_offspring_ratio = get_champion_offspring_ratio(breakthrough_pipes)
-        (
-            current_mutation_rate,
-            current_mutation_strength,
-            current_random_immigrant_ratio,
-            current_champion_offspring_ratio,
-        ) = apply_patience_diversity(
-            current_mutation_rate,
-            current_mutation_strength,
-            current_random_immigrant_ratio,
-            current_champion_offspring_ratio,
-            generations_without_champion_improvement,
-            breakthrough_pipes,
-        )
-
-        training_history.append(
-            {
-                "generation": g + 1,
-                "raw_generation_best_fitness": raw_best_fit,
-                "revalidated_generation_best_fitness": best_fit,
-                "best_fitness": best_fit,
-                "mean_fitness": mean_fit,
-                "best_pipes": best_pipes,
-                "mean_pipes": mean_pipes,
-                "best_frames": best_frames,
-                "mean_frames": mean_frames,
-                **validated_stats,
-                "generations_without_champion_improvement": generations_without_champion_improvement,
-                "mutation_rate": current_mutation_rate,
-                "mutation_strength": current_mutation_strength,
-                "champion_offspring_ratio": current_champion_offspring_ratio,
-                "random_immigrant_ratio": current_random_immigrant_ratio,
-                "pipe_exponent": PIPE_EXPONENT,
-            }
-        )
-
-        print(
-            f"Generation {g + 1:02d} | Raw best fitness: {raw_best_fit:.1f} | "
-            f"Revalidated best fitness: {best_fit:.1f} | "
-            f"Avg fitness: {mean_fit:.1f} | Revalidated best pipes: {best_pipes:.2f} | "
-            f"Avg pipes: {mean_pipes:.1f} | Revalidated best frames: {best_frames:.1f} | "
-            f"Validated champion pipes mean/min/max/std: "
-            f"{validated_stats['validated_mean_pipes']:.2f}/"
-            f"{validated_stats['validated_min_pipes']}/"
-            f"{validated_stats['validated_max_pipes']}/"
-            f"{validated_stats['validated_std_pipes']:.2f} | "
-            f"Champion score: {validated_stats['champion_score']:.2f} | "
-            f"Patience: {generations_without_champion_improvement} | "
-            f"Mutation: {current_mutation_rate:.3f}/{current_mutation_strength:.3f} | "
-            f"Champion offspring: {current_champion_offspring_ratio:.2f} | "
-            f"Random ratio: {current_random_immigrant_ratio:.2f}"
-        )
-
-        if global_best_genome is not None and target_reached(validated_stats, TARGET_PIPES):
+            top_revalidation_start_time = time.perf_counter()
+            revalidation_count = min(GENERATION_BEST_REEVALUATION_COUNT, POPULATION_SIZE)
             print(
-                "Target confirmed by champion re-evaluation: "
-                f"champion averaged {validated_stats['validated_mean_pipes']:.2f} pipes"
+                f"Generation {g + 1:02d}: Revalidating top candidates..."
+            )
+            revalidated_candidate_results = reevaluate_candidates(
+                population[:revalidation_count],
+                episodes=GENERATION_BEST_REEVALUATION_EPISODES,
+                workers=workers,
+                executor=executor,
+            )
+            revalidated_generation_results = [
+                summarize_generation_results(results)
+                for results in revalidated_candidate_results
+            ]
+            top_revalidation_time = time.perf_counter() - top_revalidation_start_time
+            print(
+                f"Generation {g + 1:02d}: Top candidate revalidation complete."
+            )
+            generation_best_result = max(
+                revalidated_generation_results,
+                key=lambda result: (result["pipes_passed"], result["fitness"]),
             )
 
-            if EARLY_STOP_ON_TARGET:
-                break
+            best_fit = generation_best_result["fitness"]
+            best_pipes = generation_best_result["pipes_passed"]
+            best_frames = generation_best_result["frames"]
 
-        population = create_next_generation(
-            population,
-            chromosome_length=chrom_len,
-            pop_size=POPULATION_SIZE,
-            mutation_strength=current_mutation_strength,
-            mutation_rate=current_mutation_rate,
-            global_best_genome=global_best_genome,
-            champion_offspring_ratio=current_champion_offspring_ratio,
-            random_immigrant_ratio=current_random_immigrant_ratio,
-        )
+            current_mutation_strength = adaptive_mutation_strength(g, generations)
+            current_mutation_rate = MUTATION_RATE
+            champion_improved = False
+
+            champion_validation_start_time = time.perf_counter()
+            validation_count = min(TOP_VALIDATION_COUNT, POPULATION_SIZE)
+            validation_candidate_indices = [
+                candidate_index
+                for candidate_index in range(validation_count)
+                if should_validate_candidate(
+                    evaluation_results[candidate_index],
+                    global_best_result,
+                )
+            ]
+            print(
+                f"Generation {g + 1:02d}: Validating champion candidates..."
+            )
+            validation_candidate_results = reevaluate_candidates(
+                population[validation_candidate_indices],
+                episodes=VALIDATION_EPISODES,
+                workers=workers,
+                executor=executor,
+            )
+            for candidate_index, candidate_results in zip(
+                validation_candidate_indices,
+                validation_candidate_results,
+            ):
+                validation_result = summarize_results(candidate_results)
+
+                if is_better_result(validation_result, global_best_result):
+                    global_best_result = validation_result
+                    global_best_genome = population[candidate_index].copy()
+                    champion_improved = True
+                    np.save(BEST_GENOME_PATH, global_best_genome)
+                    print(
+                        "New global best saved | "
+                        f"Validated mean pipes: {global_best_result['validated_mean_pipes']:.2f} | "
+                        f"Validated fitness: {global_best_result['validated_mean_fitness']:.1f} | "
+                        f"Champion score: {global_best_result['champion_score']:.2f}"
+                    )
+            print(
+                f"Generation {g + 1:02d}: Champion candidate validation complete."
+            )
+
+            validated_stats = {
+                "validated_mean_pipes": 0.0,
+                "validated_min_pipes": 0,
+                "validated_max_pipes": 0,
+                "validated_std_pipes": 0.0,
+                "validated_mean_fitness": 0.0,
+                "champion_score": 0.0,
+            }
+
+            if global_best_genome is not None:
+                print(
+                    f"Generation {g + 1:02d}: Revalidating current champion..."
+                )
+                champion_result = evaluate_champion(
+                    global_best_genome,
+                    workers=workers,
+                    executor=executor,
+                )
+
+                if is_better_result(champion_result, global_best_result):
+                    global_best_result = champion_result
+                    global_best_genome = global_best_genome.copy()
+                    champion_improved = True
+                    np.save(BEST_GENOME_PATH, global_best_genome)
+
+                validated_stats = champion_result
+                print(
+                    f"Generation {g + 1:02d}: Champion validation complete."
+                )
+            champion_validation_time = time.perf_counter() - champion_validation_start_time
+
+            if champion_improved:
+                generations_without_champion_improvement = 0
+            else:
+                generations_without_champion_improvement += 1
+
+            breakthrough_pipes = (
+                global_best_result["validated_mean_pipes"]
+                if global_best_result is not None
+                else 0.0
+            )
+            current_mutation_rate, current_mutation_strength = adapt_mutation_after_breakthrough(
+                current_mutation_rate,
+                current_mutation_strength,
+                breakthrough_pipes,
+            )
+            current_random_immigrant_ratio = RANDOM_IMMIGRANT_RATIO
+            current_champion_offspring_ratio = get_champion_offspring_ratio(breakthrough_pipes)
+            (
+                current_mutation_rate,
+                current_mutation_strength,
+                current_random_immigrant_ratio,
+                current_champion_offspring_ratio,
+            ) = apply_patience_diversity(
+                current_mutation_rate,
+                current_mutation_strength,
+                current_random_immigrant_ratio,
+                current_champion_offspring_ratio,
+                generations_without_champion_improvement,
+                breakthrough_pipes,
+            )
+
+            training_history.append(
+                {
+                    "generation": g + 1,
+                    "raw_generation_best_fitness": raw_best_fit,
+                    "revalidated_generation_best_fitness": best_fit,
+                    "best_fitness": best_fit,
+                    "mean_fitness": mean_fit,
+                    "best_pipes": best_pipes,
+                    "mean_pipes": mean_pipes,
+                    "best_frames": best_frames,
+                    "mean_frames": mean_frames,
+                    **validated_stats,
+                    "generations_without_champion_improvement": generations_without_champion_improvement,
+                    "mutation_rate": current_mutation_rate,
+                    "mutation_strength": current_mutation_strength,
+                    "champion_offspring_ratio": current_champion_offspring_ratio,
+                    "random_immigrant_ratio": current_random_immigrant_ratio,
+                    "pipe_exponent": PIPE_EXPONENT,
+                }
+            )
+
+            print(
+                f"Generation {g + 1:02d} | Raw best fitness: {raw_best_fit:.1f} | "
+                f"Revalidated best fitness: {best_fit:.1f} | "
+                f"Avg fitness: {mean_fit:.1f} | Revalidated best pipes: {best_pipes:.2f} | "
+                f"Avg pipes: {mean_pipes:.1f} | Revalidated best frames: {best_frames:.1f} | "
+                f"Validated champion pipes mean/min/max/std: "
+                f"{validated_stats['validated_mean_pipes']:.2f}/"
+                f"{validated_stats['validated_min_pipes']}/"
+                f"{validated_stats['validated_max_pipes']}/"
+                f"{validated_stats['validated_std_pipes']:.2f} | "
+                f"Champion score: {validated_stats['champion_score']:.2f} | "
+                f"Patience: {generations_without_champion_improvement} | "
+                f"Mutation: {current_mutation_rate:.3f}/{current_mutation_strength:.3f} | "
+                f"Champion offspring: {current_champion_offspring_ratio:.2f} | "
+                f"Random ratio: {current_random_immigrant_ratio:.2f}"
+            )
+
+            next_generation_time = 0.0
+            if global_best_genome is not None and target_reached(validated_stats, TARGET_PIPES):
+                print(
+                    "Target confirmed by champion re-evaluation: "
+                    f"champion averaged {validated_stats['validated_mean_pipes']:.2f} pipes"
+                )
+
+                print(
+                    f"Generation {g + 1:02d} timing | "
+                    f"population={population_eval_time:.1f}s | "
+                    f"top_revalidation={top_revalidation_time:.1f}s | "
+                    f"champion_validation={champion_validation_time:.1f}s | "
+                    f"next_generation={next_generation_time:.1f}s | "
+                    f"total={time.perf_counter() - generation_start_time:.1f}s | "
+                    f"workers={workers}"
+                )
+
+                if EARLY_STOP_ON_TARGET:
+                    break
+
+            next_generation_start_time = time.perf_counter()
+            population = create_next_generation(
+                population,
+                chromosome_length=chrom_len,
+                pop_size=POPULATION_SIZE,
+                mutation_strength=current_mutation_strength,
+                mutation_rate=current_mutation_rate,
+                global_best_genome=global_best_genome,
+                champion_offspring_ratio=current_champion_offspring_ratio,
+                random_immigrant_ratio=current_random_immigrant_ratio,
+            )
+            next_generation_time = time.perf_counter() - next_generation_start_time
+
+            print(
+                f"Generation {g + 1:02d} timing | "
+                f"population={population_eval_time:.1f}s | "
+                f"top_revalidation={top_revalidation_time:.1f}s | "
+                f"champion_validation={champion_validation_time:.1f}s | "
+                f"next_generation={next_generation_time:.1f}s | "
+                f"total={time.perf_counter() - generation_start_time:.1f}s | "
+                f"workers={workers}"
+            )
+    finally:
+        if executor is not None:
+            executor.shutdown()
 
     save_training_history(training_history, TRAINING_HISTORY_PATH)
     save_progress_plots(training_history)
@@ -455,7 +612,14 @@ def train_evolutionary_ai():
     print(f"Training history saved as '{TRAINING_HISTORY_PATH}'")
     print(f"Fitness plot saved as '{FITNESS_CHART_PATH}'")
     print(f"Pipe plot saved as '{PIPE_CHART_PATH}'")
+    print(f"Total training time: {time.perf_counter() - total_start_time:.1f}s")
+
+
+def main():
+    args = parse_args()
+    workers = resolve_worker_count(args.workers, args.no_parallel)
+    train_evolutionary_ai(workers=workers, generations=args.generations)
 
 
 if __name__ == "__main__":
-    train_evolutionary_ai()
+    main()

@@ -75,6 +75,26 @@ This keeps exploration early and makes late-stage improvements less destructive.
 
 If the champion does not improve for several generations, patience-based diversity slightly increases the random-agent ratio and normal mutation strength. When the champion improves, the patience counter resets and normal adaptive settings resume.
 
+## Parallel Training
+
+Flappy Bird environment simulation is CPU-bound. GPU acceleration is not useful for this project unless the environment is rewritten for batched GPU simulation. The practical speedup is multiprocessing across CPU cores.
+
+Population evaluation can run in parallel:
+
+```powershell
+python scripts/train.py --workers 8
+python scripts/train.py --workers 16 --generations 10
+```
+
+The training script reuses one process pool across the whole run, so worker processes are not recreated for every generation. Each generation prints timing for population evaluation, top-candidate revalidation, champion validation, next-generation creation, and total generation time.
+
+To force single-process evaluation:
+
+```powershell
+python scripts/train.py --workers 1
+python scripts/train.py --no-parallel
+```
+
 ## Outputs
 
 Training writes generated files into `outputs/`:

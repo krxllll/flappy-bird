@@ -1,4 +1,5 @@
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,15 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     sort_population_indices,
     target_reached,
 )
-from flappy_bird_ai.simulation import PIPE_EXPONENT, PIPE_REWARD, calculate_fitness  # noqa: E402
+from flappy_bird_ai.simulation import (  # noqa: E402
+    PIPE_EXPONENT,
+    PIPE_REWARD,
+    calculate_fitness,
+    evaluate_chromosome_many,
+    evaluate_population,
+    reevaluate_candidates,
+    suppress_gymnasium_observation_warnings,
+)
 
 
 def test_chromosome_length_is_2913():
@@ -85,6 +94,214 @@ def test_evaluation_result_shape_from_mocked_game(monkeypatch):
     assert result["frames"] == 3
     assert result["pipes_passed"] == 1
     assert result["fitness"] == calculate_fitness(3, 1)
+
+
+def test_evaluate_population_returns_results_in_sequential_mode(monkeypatch):
+    def fake_evaluate_chromosome(chromosome):
+        pipes = int(chromosome[0])
+        return {
+            "fitness": float(pipes * 100),
+            "frames": 10,
+            "pipes_passed": pipes,
+        }
+
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.evaluate_chromosome",
+        fake_evaluate_chromosome,
+    )
+
+    population = np.array([[1.0], [2.0], [3.0]])
+    results = evaluate_population(population, workers=1)
+
+    assert results == [
+        {"fitness": 100.0, "frames": 10, "pipes_passed": 1},
+        {"fitness": 200.0, "frames": 10, "pipes_passed": 2},
+        {"fitness": 300.0, "frames": 10, "pipes_passed": 3},
+    ]
+
+
+def test_evaluate_population_workers_one_uses_sequential_path(monkeypatch):
+    def fake_evaluate_chromosome(chromosome):
+        return {"fitness": 1.0, "frames": 1, "pipes_passed": 0}
+
+    class FailingExecutor:
+        def __init__(self, max_workers):
+            raise AssertionError("ProcessPoolExecutor should not be used")
+
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.evaluate_chromosome",
+        fake_evaluate_chromosome,
+    )
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.ProcessPoolExecutor",
+        FailingExecutor,
+    )
+
+    results = evaluate_population(np.array([[0.0], [1.0]]), workers=1)
+
+    assert len(results) == 2
+
+
+def test_suppress_gymnasium_observation_warnings_helper_exists():
+    assert callable(suppress_gymnasium_observation_warnings)
+
+
+def test_suppress_gymnasium_observation_warnings_matches_warn_prefix():
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        suppress_gymnasium_observation_warnings()
+        warnings.warn(
+            "WARN: The obs returned by the `reset()` method is not within the observation space.",
+            UserWarning,
+        )
+        warnings.warn("A different user warning", UserWarning)
+
+    assert len(captured) == 1
+    assert str(captured[0].message) == "A different user warning"
+
+
+def test_evaluate_population_worker_count_is_configurable(monkeypatch):
+    seen_workers = []
+
+    def fake_evaluate_chromosome(chromosome):
+        return {
+            "fitness": float(chromosome[0]),
+            "frames": 1,
+            "pipes_passed": int(chromosome[0]),
+        }
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            seen_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def map(self, fn, chromosomes):
+            return [fn(chromosome) for chromosome in chromosomes]
+
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.evaluate_chromosome",
+        fake_evaluate_chromosome,
+    )
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.ProcessPoolExecutor",
+        FakeExecutor,
+    )
+
+    results = evaluate_population(np.array([[4.0], [5.0]]), workers=4)
+
+    assert seen_workers == [4]
+    assert results[0]["pipes_passed"] == 4
+    assert results[1]["pipes_passed"] == 5
+
+
+def test_evaluate_population_can_reuse_existing_executor(monkeypatch):
+    def fake_evaluate_chromosome(chromosome):
+        return {
+            "fitness": float(chromosome[0]),
+            "frames": 1,
+            "pipes_passed": int(chromosome[0]),
+        }
+
+    class FailingExecutor:
+        def __init__(self, max_workers):
+            raise AssertionError("A new executor should not be created")
+
+    class ExistingExecutor:
+        def __init__(self):
+            self.was_used = False
+
+        def map(self, fn, chromosomes):
+            self.was_used = True
+            return [fn(chromosome) for chromosome in chromosomes]
+
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.evaluate_chromosome",
+        fake_evaluate_chromosome,
+    )
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.ProcessPoolExecutor",
+        FailingExecutor,
+    )
+
+    executor = ExistingExecutor()
+    results = evaluate_population(
+        np.array([[6.0], [7.0]]),
+        workers=4,
+        executor=executor,
+    )
+
+    assert executor.was_used
+    assert results[0]["pipes_passed"] == 6
+    assert results[1]["pipes_passed"] == 7
+
+
+def test_evaluate_chromosome_many_returns_expected_episode_count(monkeypatch):
+    def fake_evaluate_chromosome(chromosome):
+        return {
+            "fitness": float(chromosome[0]),
+            "frames": 1,
+            "pipes_passed": int(chromosome[0]),
+        }
+
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.evaluate_chromosome",
+        fake_evaluate_chromosome,
+    )
+
+    results = evaluate_chromosome_many(np.array([3.0]), episodes=4, workers=1)
+
+    assert len(results) == 4
+    assert all(result["pipes_passed"] == 3 for result in results)
+
+
+def test_reevaluate_candidates_accepts_existing_executor(monkeypatch):
+    def fake_evaluate_chromosome(chromosome):
+        return {
+            "fitness": float(chromosome[0]),
+            "frames": 1,
+            "pipes_passed": int(chromosome[0]),
+        }
+
+    class FailingExecutor:
+        def __init__(self, max_workers):
+            raise AssertionError("A new executor should not be created")
+
+    class ExistingExecutor:
+        def __init__(self):
+            self.was_used = False
+
+        def map(self, fn, chromosomes):
+            self.was_used = True
+            return [fn(chromosome) for chromosome in chromosomes]
+
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.evaluate_chromosome",
+        fake_evaluate_chromosome,
+    )
+    monkeypatch.setattr(
+        "flappy_bird_ai.simulation.ProcessPoolExecutor",
+        FailingExecutor,
+    )
+
+    executor = ExistingExecutor()
+    grouped_results = reevaluate_candidates(
+        np.array([[2.0], [5.0]]),
+        episodes=3,
+        workers=4,
+        executor=executor,
+    )
+
+    assert executor.was_used
+    assert len(grouped_results) == 2
+    assert len(grouped_results[0]) == 3
+    assert len(grouped_results[1]) == 3
+    assert grouped_results[0][0]["pipes_passed"] == 2
+    assert grouped_results[1][0]["pipes_passed"] == 5
 
 
 def test_fitness_increases_significantly_when_pipes_increase():
