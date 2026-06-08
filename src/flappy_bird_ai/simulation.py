@@ -1,9 +1,11 @@
 from concurrent.futures import ProcessPoolExecutor
+import random
 import time
 import warnings
 
 import gymnasium as gym
 import flappy_bird_gymnasium  # noqa: F401
+import numpy as np
 
 from flappy_bird_ai.agent import BirdAgent
 
@@ -31,7 +33,7 @@ def calculate_fitness(
     return float(frames_survived + (pipes_passed**pipe_exponent) * pipe_reward)
 
 
-def evaluate_chromosome(chromosome, render=False, frame_delay=0.0):
+def evaluate_chromosome(chromosome, render=False, frame_delay=0.0, seed=None):
     """
     Run one game of Flappy Bird and return fitness, frames, and pipes passed.
     """
@@ -39,9 +41,17 @@ def evaluate_chromosome(chromosome, render=False, frame_delay=0.0):
     render_mode = "human" if render else None
 
     env = gym.make("FlappyBird-v0", render_mode=render_mode)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        if hasattr(env.action_space, "seed"):
+            env.action_space.seed(seed)
     agent = BirdAgent()
 
-    observation, info = env.reset()
+    if seed is None:
+        observation, info = env.reset()
+    else:
+        observation, info = env.reset(seed=seed)
 
     frames_survived = 0
     pipes_passed = 0
@@ -66,6 +76,11 @@ def evaluate_chromosome(chromosome, render=False, frame_delay=0.0):
     }
 
 
+def _evaluate_seeded_job(job):
+    chromosome, seed = job
+    return evaluate_chromosome(chromosome, seed=seed)
+
+
 def evaluate_population(population, workers=1, executor=None):
     """Evaluate chromosomes sequentially or in parallel across processes."""
     chromosomes = list(population)
@@ -80,34 +95,42 @@ def evaluate_population(population, workers=1, executor=None):
         return list(executor.map(evaluate_chromosome, chromosomes))
 
 
-def evaluate_chromosome_many(chromosome, episodes, workers=1, executor=None):
-    """Evaluate the same chromosome for several independent episodes."""
-    return evaluate_population(
-        [chromosome] * episodes,
-        workers=workers,
-        executor=executor,
-    )
+def evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
+    """Evaluate one chromosome on a fixed list of seeds."""
+    jobs = [(chromosome, seed) for seed in seeds]
+
+    if workers <= 1:
+        return [_evaluate_seeded_job(job) for job in jobs]
+
+    if executor is not None:
+        return list(executor.map(_evaluate_seeded_job, jobs))
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(_evaluate_seeded_job, jobs))
 
 
-def reevaluate_candidates(chromosomes, episodes, workers=1, executor=None):
-    """Evaluate multiple chromosomes for several episodes and group results."""
-    candidate_list = list(chromosomes)
+def evaluate_population_on_seed_batch(population, seeds, workers=1, executor=None):
+    """Evaluate every chromosome on the same fixed seed batch."""
+    candidate_list = list(population)
     jobs = [
-        chromosome
+        (chromosome, seed)
         for chromosome in candidate_list
-        for _ in range(episodes)
+        for seed in seeds
     ]
 
     if not jobs:
         return []
 
-    flat_results = evaluate_population(
-        jobs,
-        workers=workers,
-        executor=executor,
-    )
+    if workers <= 1:
+        flat_results = [_evaluate_seeded_job(job) for job in jobs]
+    elif executor is not None:
+        flat_results = list(executor.map(_evaluate_seeded_job, jobs))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            flat_results = list(executor.map(_evaluate_seeded_job, jobs))
 
+    seed_count = len(seeds)
     return [
-        flat_results[index * episodes : (index + 1) * episodes]
+        flat_results[index * seed_count : (index + 1) * seed_count]
         for index in range(len(candidate_list))
     ]

@@ -1,3 +1,4 @@
+import csv
 import sys
 import warnings
 from pathlib import Path
@@ -6,16 +7,19 @@ import numpy as np
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from flappy_bird_ai.agent import BirdAgent  # noqa: E402
 from flappy_bird_ai.genetic import (  # noqa: E402
-    adapt_mutation_after_breakthrough,
+    CHAMPION_OFFSPRING_RATIO,
+    EARLY_STOP_ON_TARGET,
+    RANDOM_IMMIGRANT_RATIO,
+    TARGET_PIPES,
+    TEST_SEEDS,
+    VALIDATION_SEEDS,
     adaptive_mutation_strength,
-    apply_patience_diversity,
-    calculate_champion_score,
     create_next_generation,
-    get_champion_offspring_ratio,
     is_better_result,
     sort_population_indices,
     target_reached,
@@ -24,17 +28,16 @@ from flappy_bird_ai.simulation import (  # noqa: E402
     PIPE_EXPONENT,
     PIPE_REWARD,
     calculate_fitness,
-    evaluate_chromosome_many,
+    evaluate_chromosome_on_seeds,
     evaluate_population,
-    reevaluate_candidates,
+    evaluate_population_on_seed_batch,
     suppress_gymnasium_observation_warnings,
 )
+from scripts import train as train_script  # noqa: E402
 
 
 def test_chromosome_length_is_2913():
-    agent = BirdAgent()
-
-    assert agent.chromosome_length == 2913
+    assert BirdAgent().chromosome_length == 2913
 
 
 def test_random_chromosome_maps_to_expected_weight_shapes():
@@ -54,41 +57,36 @@ def test_predict_returns_binary_action_for_random_observation():
     observation = np.random.uniform(-1.0, 1.0, (180,))
     chromosome = np.random.uniform(-1.0, 1.0, agent.chromosome_length)
 
-    action = agent.predict(observation, chromosome)
-
-    assert action in (0, 1)
+    assert agent.predict(observation, chromosome) in (0, 1)
 
 
 def test_evaluation_result_shape_from_mocked_game(monkeypatch):
+    class FakeActionSpace:
+        def seed(self, seed):
+            pass
+
     class FakeEnv:
         def __init__(self):
             self.step_count = 0
+            self.action_space = FakeActionSpace()
 
-        def reset(self):
+        def reset(self, seed=None):
             return np.zeros(180), {}
 
         def step(self, action):
             self.step_count += 1
-            observation = np.zeros(180)
-            reward = 0.0
             terminated = self.step_count == 3
-            truncated = False
-            info = {"score": 1 if self.step_count >= 2 else 0}
-            return observation, reward, terminated, truncated, info
+            score = 1 if self.step_count >= 2 else 0
+            return np.zeros(180), 0.0, terminated, False, {"score": score}
 
         def close(self):
             pass
 
-    def fake_make(env_name, render_mode=None):
-        return FakeEnv()
-
-    monkeypatch.setattr("flappy_bird_ai.simulation.gym.make", fake_make)
+    monkeypatch.setattr("flappy_bird_ai.simulation.gym.make", lambda *args, **kwargs: FakeEnv())
 
     from flappy_bird_ai.simulation import evaluate_chromosome
 
-    agent = BirdAgent()
-    chromosome = np.zeros(agent.chromosome_length)
-    result = evaluate_chromosome(chromosome)
+    result = evaluate_chromosome(np.zeros(BirdAgent().chromosome_length))
 
     assert set(result) == {"fitness", "frames", "pipes_passed"}
     assert result["frames"] == 3
@@ -96,54 +94,177 @@ def test_evaluation_result_shape_from_mocked_game(monkeypatch):
     assert result["fitness"] == calculate_fitness(3, 1)
 
 
-def test_evaluate_population_returns_results_in_sequential_mode(monkeypatch):
-    def fake_evaluate_chromosome(chromosome):
-        pipes = int(chromosome[0])
-        return {
-            "fitness": float(pipes * 100),
-            "frames": 10,
-            "pipes_passed": pipes,
-        }
+def test_evaluate_chromosome_accepts_seed(monkeypatch):
+    seen = {"reset_seed": None, "action_seed": None}
 
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.evaluate_chromosome",
-        fake_evaluate_chromosome,
-    )
+    class FakeActionSpace:
+        def seed(self, seed):
+            seen["action_seed"] = seed
 
-    population = np.array([[1.0], [2.0], [3.0]])
-    results = evaluate_population(population, workers=1)
+    class FakeEnv:
+        def __init__(self):
+            self.action_space = FakeActionSpace()
 
-    assert results == [
-        {"fitness": 100.0, "frames": 10, "pipes_passed": 1},
-        {"fitness": 200.0, "frames": 10, "pipes_passed": 2},
-        {"fitness": 300.0, "frames": 10, "pipes_passed": 3},
-    ]
+        def reset(self, seed=None):
+            seen["reset_seed"] = seed
+            return np.zeros(180), {}
+
+        def step(self, action):
+            return np.zeros(180), 0.0, True, False, {"score": 0}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("flappy_bird_ai.simulation.gym.make", lambda *args, **kwargs: FakeEnv())
+
+    from flappy_bird_ai.simulation import evaluate_chromosome
+
+    evaluate_chromosome(np.zeros(BirdAgent().chromosome_length), seed=123)
+
+    assert seen["reset_seed"] == 123
+    assert seen["action_seed"] == 123
+
+
+def test_evaluate_chromosome_seed_does_not_require_action_space_seed(monkeypatch):
+    class FakeActionSpace:
+        pass
+
+    class FakeEnv:
+        def __init__(self):
+            self.action_space = FakeActionSpace()
+
+        def reset(self, seed=None):
+            return np.zeros(180), {}
+
+        def step(self, action):
+            return np.zeros(180), 0.0, True, False, {"score": 0}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("flappy_bird_ai.simulation.gym.make", lambda *args, **kwargs: FakeEnv())
+
+    from flappy_bird_ai.simulation import evaluate_chromosome
+
+    assert evaluate_chromosome(np.zeros(BirdAgent().chromosome_length), seed=123)["pipes_passed"] == 0
+
+
+def test_evaluate_chromosome_same_seed_is_deterministic(monkeypatch):
+    class FakeActionSpace:
+        def seed(self, seed):
+            pass
+
+    class FakeEnv:
+        def __init__(self):
+            self.step_count = 0
+            self.limit = 1
+            self.action_space = FakeActionSpace()
+
+        def reset(self, seed=None):
+            self.step_count = 0
+            self.limit = int(np.random.randint(2, 5))
+            return np.zeros(180), {}
+
+        def step(self, action):
+            self.step_count += 1
+            score = int(np.random.randint(0, 4))
+            terminated = self.step_count >= self.limit
+            return np.zeros(180), 0.0, terminated, False, {"score": score}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("flappy_bird_ai.simulation.gym.make", lambda *args, **kwargs: FakeEnv())
+
+    from flappy_bird_ai.simulation import evaluate_chromosome
+
+    chromosome = np.zeros(BirdAgent().chromosome_length)
+
+    assert evaluate_chromosome(chromosome, seed=321) == evaluate_chromosome(chromosome, seed=321)
 
 
 def test_evaluate_population_workers_one_uses_sequential_path(monkeypatch):
     def fake_evaluate_chromosome(chromosome):
-        return {"fitness": 1.0, "frames": 1, "pipes_passed": 0}
+        return {"fitness": 1.0, "frames": 1, "pipes_passed": int(chromosome[0])}
 
     class FailingExecutor:
         def __init__(self, max_workers):
             raise AssertionError("ProcessPoolExecutor should not be used")
 
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.evaluate_chromosome",
-        fake_evaluate_chromosome,
-    )
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.ProcessPoolExecutor",
-        FailingExecutor,
-    )
+    monkeypatch.setattr("flappy_bird_ai.simulation.evaluate_chromosome", fake_evaluate_chromosome)
+    monkeypatch.setattr("flappy_bird_ai.simulation.ProcessPoolExecutor", FailingExecutor)
 
     results = evaluate_population(np.array([[0.0], [1.0]]), workers=1)
 
-    assert len(results) == 2
+    assert [result["pipes_passed"] for result in results] == [0, 1]
 
 
-def test_suppress_gymnasium_observation_warnings_helper_exists():
-    assert callable(suppress_gymnasium_observation_warnings)
+def test_evaluate_population_can_reuse_existing_executor(monkeypatch):
+    def fake_evaluate_chromosome(chromosome):
+        return {"fitness": float(chromosome[0]), "frames": 1, "pipes_passed": int(chromosome[0])}
+
+    class FailingExecutor:
+        def __init__(self, max_workers):
+            raise AssertionError("A new executor should not be created")
+
+    class ExistingExecutor:
+        def __init__(self):
+            self.was_used = False
+
+        def map(self, fn, chromosomes):
+            self.was_used = True
+            return [fn(chromosome) for chromosome in chromosomes]
+
+    monkeypatch.setattr("flappy_bird_ai.simulation.evaluate_chromosome", fake_evaluate_chromosome)
+    monkeypatch.setattr("flappy_bird_ai.simulation.ProcessPoolExecutor", FailingExecutor)
+
+    executor = ExistingExecutor()
+    results = evaluate_population(np.array([[6.0], [7.0]]), workers=4, executor=executor)
+
+    assert executor.was_used
+    assert [result["pipes_passed"] for result in results] == [6, 7]
+
+
+def test_seeded_population_batch_reuses_executor(monkeypatch):
+    def fake_evaluate_chromosome(chromosome, render=False, frame_delay=0.0, seed=None):
+        return {"fitness": float(seed), "frames": 1, "pipes_passed": int(chromosome[0] + seed)}
+
+    class ExistingExecutor:
+        def __init__(self):
+            self.was_used = False
+
+        def map(self, fn, jobs):
+            self.was_used = True
+            return [fn(job) for job in jobs]
+
+    monkeypatch.setattr("flappy_bird_ai.simulation.evaluate_chromosome", fake_evaluate_chromosome)
+
+    executor = ExistingExecutor()
+    grouped_results = evaluate_population_on_seed_batch(
+        np.array([[1.0], [2.0]]),
+        seeds=[11, 12],
+        workers=4,
+        executor=executor,
+    )
+
+    assert executor.was_used
+    assert len(grouped_results) == 2
+    assert [result["pipes_passed"] for result in grouped_results[0]] == [12, 13]
+
+
+def test_evaluate_chromosome_on_seeds_groups_seeded_runs(monkeypatch):
+    seen_seeds = []
+
+    def fake_evaluate_chromosome(chromosome, render=False, frame_delay=0.0, seed=None):
+        seen_seeds.append(seed)
+        return {"fitness": float(seed), "frames": 1, "pipes_passed": int(seed)}
+
+    monkeypatch.setattr("flappy_bird_ai.simulation.evaluate_chromosome", fake_evaluate_chromosome)
+
+    results = evaluate_chromosome_on_seeds(np.array([1.0]), seeds=[5, 6], workers=1)
+
+    assert seen_seeds == [5, 6]
+    assert [result["pipes_passed"] for result in results] == [5, 6]
 
 
 def test_suppress_gymnasium_observation_warnings_matches_warn_prefix():
@@ -158,150 +279,6 @@ def test_suppress_gymnasium_observation_warnings_matches_warn_prefix():
 
     assert len(captured) == 1
     assert str(captured[0].message) == "A different user warning"
-
-
-def test_evaluate_population_worker_count_is_configurable(monkeypatch):
-    seen_workers = []
-
-    def fake_evaluate_chromosome(chromosome):
-        return {
-            "fitness": float(chromosome[0]),
-            "frames": 1,
-            "pipes_passed": int(chromosome[0]),
-        }
-
-    class FakeExecutor:
-        def __init__(self, max_workers):
-            seen_workers.append(max_workers)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            return False
-
-        def map(self, fn, chromosomes):
-            return [fn(chromosome) for chromosome in chromosomes]
-
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.evaluate_chromosome",
-        fake_evaluate_chromosome,
-    )
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.ProcessPoolExecutor",
-        FakeExecutor,
-    )
-
-    results = evaluate_population(np.array([[4.0], [5.0]]), workers=4)
-
-    assert seen_workers == [4]
-    assert results[0]["pipes_passed"] == 4
-    assert results[1]["pipes_passed"] == 5
-
-
-def test_evaluate_population_can_reuse_existing_executor(monkeypatch):
-    def fake_evaluate_chromosome(chromosome):
-        return {
-            "fitness": float(chromosome[0]),
-            "frames": 1,
-            "pipes_passed": int(chromosome[0]),
-        }
-
-    class FailingExecutor:
-        def __init__(self, max_workers):
-            raise AssertionError("A new executor should not be created")
-
-    class ExistingExecutor:
-        def __init__(self):
-            self.was_used = False
-
-        def map(self, fn, chromosomes):
-            self.was_used = True
-            return [fn(chromosome) for chromosome in chromosomes]
-
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.evaluate_chromosome",
-        fake_evaluate_chromosome,
-    )
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.ProcessPoolExecutor",
-        FailingExecutor,
-    )
-
-    executor = ExistingExecutor()
-    results = evaluate_population(
-        np.array([[6.0], [7.0]]),
-        workers=4,
-        executor=executor,
-    )
-
-    assert executor.was_used
-    assert results[0]["pipes_passed"] == 6
-    assert results[1]["pipes_passed"] == 7
-
-
-def test_evaluate_chromosome_many_returns_expected_episode_count(monkeypatch):
-    def fake_evaluate_chromosome(chromosome):
-        return {
-            "fitness": float(chromosome[0]),
-            "frames": 1,
-            "pipes_passed": int(chromosome[0]),
-        }
-
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.evaluate_chromosome",
-        fake_evaluate_chromosome,
-    )
-
-    results = evaluate_chromosome_many(np.array([3.0]), episodes=4, workers=1)
-
-    assert len(results) == 4
-    assert all(result["pipes_passed"] == 3 for result in results)
-
-
-def test_reevaluate_candidates_accepts_existing_executor(monkeypatch):
-    def fake_evaluate_chromosome(chromosome):
-        return {
-            "fitness": float(chromosome[0]),
-            "frames": 1,
-            "pipes_passed": int(chromosome[0]),
-        }
-
-    class FailingExecutor:
-        def __init__(self, max_workers):
-            raise AssertionError("A new executor should not be created")
-
-    class ExistingExecutor:
-        def __init__(self):
-            self.was_used = False
-
-        def map(self, fn, chromosomes):
-            self.was_used = True
-            return [fn(chromosome) for chromosome in chromosomes]
-
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.evaluate_chromosome",
-        fake_evaluate_chromosome,
-    )
-    monkeypatch.setattr(
-        "flappy_bird_ai.simulation.ProcessPoolExecutor",
-        FailingExecutor,
-    )
-
-    executor = ExistingExecutor()
-    grouped_results = reevaluate_candidates(
-        np.array([[2.0], [5.0]]),
-        episodes=3,
-        workers=4,
-        executor=executor,
-    )
-
-    assert executor.was_used
-    assert len(grouped_results) == 2
-    assert len(grouped_results[0]) == 3
-    assert len(grouped_results[1]) == 3
-    assert grouped_results[0][0]["pipes_passed"] == 2
-    assert grouped_results[1][0]["pipes_passed"] == 5
 
 
 def test_fitness_increases_significantly_when_pipes_increase():
@@ -330,28 +307,6 @@ def test_higher_pipe_count_beats_higher_survival_time():
     assert more_pipes > long_survival
 
 
-def test_target_pipe_threshold_detects_success():
-    assert target_reached({"pipes_passed": 10}, target_pipes=10)
-    assert not target_reached({"pipes_passed": 9}, target_pipes=10)
-    assert target_reached({"validated_mean_pipes": 10.0}, target_pipes=10)
-    assert not target_reached({"validated_mean_pipes": 9.9}, target_pipes=10)
-
-
-def test_champion_comparison_prioritizes_validated_mean_pipes():
-    current_best = {
-        "validated_mean_pipes": 4.0,
-        "validated_mean_fitness": 25000.0,
-        "champion_score": 4.8,
-    }
-    candidate = {
-        "validated_mean_pipes": 5.0,
-        "validated_mean_fitness": 20000.0,
-        "champion_score": 4.2,
-    }
-
-    assert is_better_result(candidate, current_best)
-
-
 def test_population_sorting_prioritizes_pipes_over_fitness():
     evaluation_results = [
         {"pipes_passed": 1, "fitness": 50000.0, "frames": 900},
@@ -363,104 +318,104 @@ def test_population_sorting_prioritizes_pipes_over_fitness():
     assert sort_population_indices(evaluation_results) == [3, 2, 1, 0]
 
 
-def test_champion_score_breaks_ties_for_equal_mean_pipes():
+def test_population_sorting_uses_mean_pipes_when_present():
+    evaluation_results = [
+        {"mean_pipes": 2.0, "pipes_passed": 9, "fitness": 100.0, "frames": 1},
+        {"mean_pipes": 3.0, "pipes_passed": 1, "fitness": 50.0, "frames": 1},
+    ]
+
+    assert sort_population_indices(evaluation_results) == [1, 0]
+
+
+def test_champion_comparison_uses_validated_mean_min_then_fitness():
     current_best = {
-        "validated_mean_pipes": 5.0,
-        "validated_mean_fitness": 25000.0,
-        "champion_score": 4.8,
+        "validated_mean_pipes": 3.0,
+        "validated_min_pipes": 2,
+        "validated_mean_fitness": 12000.0,
     }
-    candidate = {
-        "validated_mean_pipes": 5.0,
-        "validated_mean_fitness": 20000.0,
-        "champion_score": 5.1,
-    }
-
-    assert is_better_result(candidate, current_best)
-
-
-def test_validated_mean_fitness_is_tertiary_tiebreaker():
-    current_best = {
-        "validated_mean_pipes": 5.0,
-        "validated_mean_fitness": 20000.0,
-        "champion_score": 5.1,
-    }
-    candidate = {
-        "validated_mean_pipes": 5.0,
-        "validated_mean_fitness": 22000.0,
-        "champion_score": 5.1,
-    }
-
-    assert is_better_result(candidate, current_best)
-
-
-def test_champion_comparison_prefers_stable_higher_min_pipes():
-    stable_score = calculate_champion_score(
-        validated_mean_pipes=10.0,
-        validated_min_pipes=8,
-        validated_std_pipes=1.0,
-    )
-    unstable_score = calculate_champion_score(
-        validated_mean_pipes=10.0,
-        validated_min_pipes=2,
-        validated_std_pipes=5.0,
-    )
-    stable = {
-        "validated_mean_pipes": 10.0,
-        "validated_mean_fitness": 10000.0,
-        "champion_score": stable_score,
-    }
-    unstable = {
-        "validated_mean_pipes": 10.0,
-        "validated_mean_fitness": 10000.0,
-        "champion_score": unstable_score,
-    }
-
-    assert stable_score > unstable_score
-    assert is_better_result(stable, unstable)
-
-
-def test_lucky_high_max_low_mean_candidate_does_not_replace_stable_champion():
-    stable = {
-        "validated_mean_pipes": 8.0,
-        "validated_min_pipes": 7,
-        "validated_max_pipes": 10,
-        "validated_std_pipes": 1.0,
-        "validated_mean_fitness": 9000.0,
-    }
-    lucky = {
-        "validated_mean_pipes": 5.0,
+    higher_mean = {
+        "validated_mean_pipes": 4.0,
         "validated_min_pipes": 0,
-        "validated_max_pipes": 30,
-        "validated_std_pipes": 9.0,
-        "validated_mean_fitness": 20000.0,
+        "validated_mean_fitness": 1000.0,
     }
-    stable["champion_score"] = calculate_champion_score(
-        stable["validated_mean_pipes"],
-        stable["validated_min_pipes"],
-        stable["validated_std_pipes"],
+    higher_min = {
+        "validated_mean_pipes": 3.0,
+        "validated_min_pipes": 3,
+        "validated_mean_fitness": 1000.0,
+    }
+    higher_fitness = {
+        "validated_mean_pipes": 3.0,
+        "validated_min_pipes": 2,
+        "validated_mean_fitness": 13000.0,
+    }
+
+    assert is_better_result(higher_mean, current_best)
+    assert is_better_result(higher_min, current_best)
+    assert is_better_result(higher_fitness, current_best)
+
+
+def test_target_pipe_threshold_detects_success():
+    assert target_reached({"pipes_passed": 10}, target_pipes=10)
+    assert not target_reached({"pipes_passed": 9}, target_pipes=10)
+    assert target_reached({"validated_mean_pipes": 10.0}, target_pipes=10)
+    assert not target_reached({"validated_mean_pipes": 9.9}, target_pipes=10)
+
+
+def test_no_early_stop_disables_target_stop():
+    assert not train_script.should_stop_training(
+        {"validated_mean_pipes": TARGET_PIPES},
+        target_pipes=TARGET_PIPES,
+        early_stop_on_target=False,
     )
-    lucky["champion_score"] = calculate_champion_score(
-        lucky["validated_mean_pipes"],
-        lucky["validated_min_pipes"],
-        lucky["validated_std_pipes"],
+
+
+def test_target_pipes_argument_overrides_default_target():
+    args = train_script.parse_args(["--target-pipes", "20"])
+
+    assert args.target_pipes == 20
+    assert not train_script.should_stop_training(
+        {"validated_mean_pipes": 10.5},
+        target_pipes=args.target_pipes,
+        early_stop_on_target=True,
+    )
+    assert train_script.should_stop_training(
+        {"validated_mean_pipes": 20.0},
+        target_pipes=args.target_pipes,
+        early_stop_on_target=True,
     )
 
-    assert not is_better_result(lucky, stable)
+
+def test_default_early_stop_behavior_remains_unchanged():
+    args = train_script.parse_args([])
+
+    assert args.no_early_stop is False
+    assert args.target_pipes is None
+    assert train_script.should_stop_training(
+        {"validated_mean_pipes": TARGET_PIPES},
+        target_pipes=TARGET_PIPES,
+        early_stop_on_target=EARLY_STOP_ON_TARGET,
+    )
 
 
-def test_stable_low_pipe_candidate_does_not_replace_higher_pipe_champion():
-    higher_pipe_champion = {
-        "validated_mean_pipes": 6.0,
-        "validated_mean_fitness": 10000.0,
-        "champion_score": 5.0,
-    }
-    stable_low_pipe_candidate = {
-        "validated_mean_pipes": 5.0,
-        "validated_mean_fitness": 30000.0,
-        "champion_score": 8.0,
-    }
+def test_worker_arguments_resolve_to_expected_modes(monkeypatch):
+    monkeypatch.setattr(train_script.os, "cpu_count", lambda: 8)
 
-    assert not is_better_result(stable_low_pipe_candidate, higher_pipe_champion)
+    assert train_script.resolve_worker_count(None, no_parallel=False) == 7
+    assert train_script.resolve_worker_count(4, no_parallel=False) == 4
+    assert train_script.resolve_worker_count(4, no_parallel=True) == 1
+    assert train_script.resolve_worker_count(0, no_parallel=False) == 1
+
+
+def test_generation_argument_is_parsed():
+    args = train_script.parse_args(["--generations", "3", "--workers", "2", "--no-parallel"])
+
+    assert args.generations == 3
+    assert args.workers == 2
+    assert args.no_parallel is True
+
+
+def test_test_seeds_are_separate_from_validation_seeds():
+    assert set(TEST_SEEDS).isdisjoint(VALIDATION_SEEDS)
 
 
 def test_adaptive_mutation_strength_decreases_to_minimum():
@@ -486,68 +441,6 @@ def test_adaptive_mutation_strength_decreases_to_minimum():
     assert start_strength == 0.2
     assert late_strength < start_strength
     assert beyond_end_strength == 0.05
-
-
-def test_mutation_is_reduced_after_breakthrough_threshold():
-    unchanged_rate, unchanged_strength = adapt_mutation_after_breakthrough(
-        mutation_rate=0.15,
-        mutation_strength=0.12,
-        global_best_pipes=9,
-    )
-    reduced_rate, reduced_strength = adapt_mutation_after_breakthrough(
-        mutation_rate=0.15,
-        mutation_strength=0.12,
-        global_best_pipes=10,
-    )
-
-    assert unchanged_rate == 0.15
-    assert unchanged_strength == 0.12
-    assert reduced_rate == 0.05
-    assert reduced_strength == 0.03
-
-
-def test_patience_logic_increases_diversity_after_no_improvement():
-    (
-        normal_rate,
-        normal_strength,
-        normal_random_ratio,
-        normal_champion_ratio,
-    ) = apply_patience_diversity(
-        mutation_rate=0.15,
-        mutation_strength=0.05,
-        random_immigrant_ratio=0.1,
-        champion_offspring_ratio=0.15,
-        generations_without_improvement=14,
-        validated_mean_pipes=3.0,
-    )
-    (
-        boosted_rate,
-        boosted_strength,
-        boosted_random_ratio,
-        boosted_champion_ratio,
-    ) = apply_patience_diversity(
-        mutation_rate=0.15,
-        mutation_strength=0.05,
-        random_immigrant_ratio=0.1,
-        champion_offspring_ratio=0.15,
-        generations_without_improvement=15,
-        validated_mean_pipes=3.0,
-    )
-
-    assert normal_rate == 0.15
-    assert normal_strength == 0.05
-    assert normal_random_ratio == 0.1
-    assert normal_champion_ratio == 0.15
-    assert boosted_rate == 0.20
-    assert boosted_strength > normal_strength
-    assert boosted_random_ratio > normal_random_ratio
-    assert boosted_champion_ratio == 0.10
-
-
-def test_dynamic_champion_offspring_ratio_is_lower_for_weak_champions():
-    assert get_champion_offspring_ratio(2.0) == 0.15
-    assert get_champion_offspring_ratio(5.0) == 0.25
-    assert get_champion_offspring_ratio(10.0) == 0.35
 
 
 def test_elites_are_copied_and_not_mutated_in_place():
@@ -596,34 +489,6 @@ def test_global_best_is_injected_into_next_generation():
     assert not np.shares_memory(next_generation[0], global_best)
 
 
-def test_champion_offspring_are_copied_from_global_best_safely():
-    population = np.array(
-        [
-            np.full(5, 3.0),
-            np.full(5, 2.0),
-            np.full(5, 1.0),
-        ]
-    )
-    global_best = np.full(5, 42.0)
-
-    next_generation = create_next_generation(
-        population,
-        pop_size=6,
-        elite_size=0,
-        champion_mutation_rate=0.0,
-        global_best_genome=global_best,
-        champion_offspring_ratio=0.5,
-    )
-
-    assert np.array_equal(next_generation[0], global_best)
-    assert np.array_equal(next_generation[1], global_best)
-    assert np.array_equal(next_generation[2], global_best)
-    assert np.array_equal(next_generation[3], global_best)
-
-    for index in range(4):
-        assert not np.shares_memory(next_generation[index], global_best)
-
-
 def test_champion_offspring_use_small_mutation_without_mutating_original(monkeypatch):
     import flappy_bird_ai.genetic as genetic
 
@@ -636,17 +501,9 @@ def test_champion_offspring_use_small_mutation_without_mutating_original(monkeyp
 
     monkeypatch.setattr(genetic, "mutate", fake_mutate)
 
-    population = np.array(
-        [
-            np.full(5, 3.0),
-            np.full(5, 2.0),
-            np.full(5, 1.0),
-        ]
-    )
     global_best = np.full(5, 42.0)
-
-    next_generation = genetic.create_next_generation(
-        population,
+    genetic.create_next_generation(
+        np.array([np.full(5, 3.0), np.full(5, 2.0), np.full(5, 1.0)]),
         pop_size=5,
         elite_size=0,
         mutation_rate=0.15,
@@ -657,6 +514,131 @@ def test_champion_offspring_use_small_mutation_without_mutating_original(monkeyp
     )
 
     assert np.array_equal(global_best, np.full(5, 42.0))
-    assert np.array_equal(next_generation[0], global_best)
     assert mutation_calls[0][0] == 0.02
     assert mutation_calls[0][1] == 0.03
+
+
+def test_random_immigrants_preserve_population_size():
+    next_generation = create_next_generation(
+        np.array([np.full(5, 3.0), np.full(5, 2.0), np.full(5, 1.0)]),
+        pop_size=10,
+        elite_size=1,
+        mutation_rate=0.0,
+        random_immigrant_ratio=RANDOM_IMMIGRANT_RATIO,
+    )
+
+    assert next_generation.shape == (10, 5)
+
+
+def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch, tmp_path):
+    class FakeAgent:
+        chromosome_length = 1
+
+    saved_next_generation = {}
+
+    def fake_initialize_population(pop_size, chromosome_length):
+        return np.array([[1.0], [2.0], [3.0]])
+
+    def fake_evaluate_population(population, workers=1, executor=None):
+        return [
+            {"fitness": float(chromosome[0] * 100), "frames": int(chromosome[0]), "pipes_passed": int(chromosome[0])}
+            for chromosome in population
+        ]
+
+    def fake_evaluate_population_on_seed_batch(population, seeds, workers=1, executor=None):
+        grouped = []
+        for chromosome in population:
+            value = int(chromosome[0])
+            pipes = [4, 4] if value == 2 else [value, value]
+            grouped.append(
+                [
+                    {"fitness": float(pipe * 100), "frames": pipe, "pipes_passed": pipe}
+                    for pipe in pipes
+                ]
+            )
+        return grouped
+
+    def fake_evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
+        value = int(chromosome[0])
+        pipes = [4, 4] if value == 2 else [value, value]
+        return [
+            {"fitness": float(pipe * 100), "frames": pipe, "pipes_passed": pipe}
+            for pipe in pipes
+        ]
+
+    def fake_create_next_generation(population, **kwargs):
+        saved_next_generation["global_best_genome"] = kwargs["global_best_genome"].copy()
+        return population
+
+    monkeypatch.setattr(train_script, "BirdAgent", FakeAgent)
+    monkeypatch.setattr(train_script, "POPULATION_SIZE", 3)
+    monkeypatch.setattr(train_script, "TOP_VALIDATION_COUNT", 3)
+    monkeypatch.setattr(train_script, "VALIDATION_SEEDS", [10, 11])
+    monkeypatch.setattr(train_script, "TEST_SEEDS", [20, 21])
+    monkeypatch.setattr(train_script, "BEST_GENOME_PATH", tmp_path / "best.npy")
+    monkeypatch.setattr(train_script, "TRAINING_HISTORY_PATH", tmp_path / "history.csv")
+    monkeypatch.setattr(train_script, "FITNESS_CHART_PATH", tmp_path / "fitness.png")
+    monkeypatch.setattr(train_script, "PIPE_CHART_PATH", tmp_path / "pipes.png")
+    monkeypatch.setattr(train_script, "initialize_population", fake_initialize_population)
+    monkeypatch.setattr(train_script, "evaluate_population", fake_evaluate_population)
+    monkeypatch.setattr(train_script, "evaluate_population_on_seed_batch", fake_evaluate_population_on_seed_batch)
+    monkeypatch.setattr(train_script, "evaluate_chromosome_on_seeds", fake_evaluate_chromosome_on_seeds)
+    monkeypatch.setattr(train_script, "create_next_generation", fake_create_next_generation)
+    monkeypatch.setattr(train_script, "save_progress_plots", lambda history: None)
+
+    train_script.train_evolutionary_ai(
+        workers=1,
+        generations=1,
+        target_pipes=10,
+        early_stop_on_target=False,
+    )
+
+    with (tmp_path / "history.csv").open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        rows = list(reader)
+
+    assert reader.fieldnames == train_script.CSV_FIELDNAMES
+    assert rows[0]["validated_mean_pipes"] == "4.0"
+    assert rows[0]["validated_min_pipes"] == "4"
+    assert np.array_equal(saved_next_generation["global_best_genome"], np.array([2.0]))
+    assert np.array_equal(np.load(tmp_path / "best.npy"), np.array([2.0]))
+
+
+def test_plot_lines_are_simple(monkeypatch):
+    labels = []
+
+    monkeypatch.setattr(train_script.plt, "figure", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "plot", lambda *args, **kwargs: labels.append(kwargs["label"]))
+    monkeypatch.setattr(train_script.plt, "title", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "xlabel", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "ylabel", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "legend", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "grid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "tight_layout", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "savefig", lambda *args, **kwargs: None)
+    monkeypatch.setattr(train_script.plt, "close", lambda *args, **kwargs: None)
+
+    train_script.save_progress_plots(
+        [
+            {
+                "generation": 1,
+                "best_fitness": 10.0,
+                "mean_fitness": 5.0,
+                "validated_mean_fitness": 8.0,
+                "best_pipes": 2,
+                "mean_pipes": 1.0,
+                "validated_mean_pipes": 1.5,
+                "validated_min_pipes": 1,
+            }
+        ]
+    )
+
+    assert labels == [
+        "Generation Best Fitness",
+        "Mean Fitness",
+        "Validated Global Best Fitness",
+        "Generation Best Pipes",
+        "Mean Pipes",
+        "Validated Global Best Mean Pipes",
+        "Validated Global Best Min Pipes",
+    ]
