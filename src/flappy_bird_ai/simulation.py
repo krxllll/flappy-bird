@@ -95,15 +95,6 @@ def evaluate_population(population, workers=1, executor=None):
         return list(executor.map(evaluate_chromosome, chromosomes))
 
 
-def evaluate_chromosome_many(chromosome, episodes, workers=1, executor=None):
-    """Evaluate the same chromosome for several independent episodes."""
-    return evaluate_population(
-        [chromosome] * episodes,
-        workers=workers,
-        executor=executor,
-    )
-
-
 def evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
     """Evaluate one chromosome on a fixed list of seeds."""
     jobs = [(chromosome, seed) for seed in seeds]
@@ -116,30 +107,6 @@ def evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         return list(executor.map(_evaluate_seeded_job, jobs))
-
-
-def reevaluate_candidates(chromosomes, episodes, workers=1, executor=None):
-    """Evaluate multiple chromosomes for several episodes and group results."""
-    candidate_list = list(chromosomes)
-    jobs = [
-        chromosome
-        for chromosome in candidate_list
-        for _ in range(episodes)
-    ]
-
-    if not jobs:
-        return []
-
-    flat_results = evaluate_population(
-        jobs,
-        workers=workers,
-        executor=executor,
-    )
-
-    return [
-        flat_results[index * episodes : (index + 1) * episodes]
-        for index in range(len(candidate_list))
-    ]
 
 
 def evaluate_population_on_seed_batch(population, seeds, workers=1, executor=None):

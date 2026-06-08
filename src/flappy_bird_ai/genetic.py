@@ -10,6 +10,7 @@ MUTATION_STRENGTH = INITIAL_MUTATION_STRENGTH
 ELITE_SIZE = 5
 TARGET_PIPES = 10
 EARLY_STOP_ON_TARGET = True
+TOP_VALIDATION_COUNT = 5
 VALIDATION_SEEDS = list(range(10000, 10020))
 TEST_SEEDS = list(range(20000, 20050))
 RANDOM_IMMIGRANT_RATIO = 0.1
@@ -53,7 +54,7 @@ def sort_population_indices(evaluation_results):
     return sorted(
         range(len(evaluation_results)),
         key=lambda i: (
-            evaluation_results[i]["pipes_passed"],
+            evaluation_results[i].get("mean_pipes", evaluation_results[i]["pipes_passed"]),
             evaluation_results[i]["fitness"],
             evaluation_results[i]["frames"],
         ),
@@ -123,25 +124,22 @@ def create_next_generation(
     return np.array(next_generation)
 
 
-def _result_key(result):
-    pipes = result.get(
-        "validated_mean_pipes",
-        result.get("mean_pipes", result.get("pipes_passed", 0)),
-    )
-    fitness = result.get(
-        "validated_mean_fitness",
-        result.get("mean_fitness", result.get("fitness", 0.0)),
-    )
-    frames = result.get("mean_frames", result.get("frames", 0.0))
-    return pipes, fitness, frames
-
-
 def is_better_result(candidate, current_best):
-    """Compare candidates using the baseline pipes, fitness, frames ordering."""
+    """Compare validated champions by mean pipes, min pipes, then fitness."""
     if current_best is None:
         return True
 
-    return _result_key(candidate) > _result_key(current_best)
+    candidate_key = (
+        candidate["validated_mean_pipes"],
+        candidate["validated_min_pipes"],
+        candidate["validated_mean_fitness"],
+    )
+    current_key = (
+        current_best["validated_mean_pipes"],
+        current_best["validated_min_pipes"],
+        current_best["validated_mean_fitness"],
+    )
+    return candidate_key > current_key
 
 
 def target_reached(evaluation_result, target_pipes=TARGET_PIPES):
