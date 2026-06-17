@@ -1,9 +1,11 @@
 import csv
+import json
 import sys
 import warnings
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,11 +35,38 @@ from flappy_bird_ai.simulation import (  # noqa: E402
     evaluate_population_on_seed_batch,
     suppress_gymnasium_observation_warnings,
 )
+from scripts import enjoy as enjoy_script  # noqa: E402
 from scripts import train as train_script  # noqa: E402
 
 
 def test_chromosome_length_is_2913():
     assert BirdAgent().chromosome_length == 2913
+
+
+def test_binned18_hidden8_chromosome_length_is_161():
+    assert BirdAgent(input_mode="binned18", hidden_size=8).chromosome_length == 161
+
+
+def test_binned30_hidden8_chromosome_length_is_257():
+    assert BirdAgent(input_mode="binned30", hidden_size=8).chromosome_length == 257
+
+
+def test_preprocessing_returns_expected_feature_counts():
+    observation = np.arange(180, dtype=float)
+
+    assert len(BirdAgent(input_mode="raw180").preprocess_observation(observation)) == 180
+    assert len(BirdAgent(input_mode="binned18").preprocess_observation(observation)) == 18
+    assert len(BirdAgent(input_mode="binned30").preprocess_observation(observation)) == 30
+
+
+def test_binned_preprocessing_uses_group_means():
+    observation = np.arange(180, dtype=float)
+
+    binned18 = BirdAgent(input_mode="binned18").preprocess_observation(observation)
+    binned30 = BirdAgent(input_mode="binned30").preprocess_observation(observation)
+
+    assert binned18[0] == np.mean(np.arange(10, dtype=float))
+    assert binned30[0] == np.mean(np.arange(6, dtype=float))
 
 
 def test_random_chromosome_maps_to_expected_weight_shapes():
@@ -58,6 +87,23 @@ def test_predict_returns_binary_action_for_random_observation():
     chromosome = np.random.uniform(-1.0, 1.0, agent.chromosome_length)
 
     assert agent.predict(observation, chromosome) in (0, 1)
+
+
+def test_predict_returns_binary_action_for_each_input_mode():
+    observation = np.random.uniform(-1.0, 1.0, (180,))
+
+    for input_mode in ("raw180", "binned18", "binned30"):
+        agent = BirdAgent(input_mode=input_mode, hidden_size=8)
+        chromosome = np.random.uniform(-1.0, 1.0, agent.chromosome_length)
+
+        assert agent.predict(observation, chromosome) in (0, 1)
+
+
+def test_invalid_chromosome_length_raises_clear_error():
+    agent = BirdAgent(input_mode="binned18", hidden_size=8)
+
+    with pytest.raises(ValueError, match="Chromosome length mismatch"):
+        agent.map_chromosome_to_weights(np.zeros(agent.chromosome_length - 1))
 
 
 def test_evaluation_result_shape_from_mocked_game(monkeypatch):
@@ -414,6 +460,13 @@ def test_generation_argument_is_parsed():
     assert args.no_parallel is True
 
 
+def test_architecture_arguments_are_parsed():
+    args = train_script.parse_args(["--input-mode", "binned18", "--hidden-size", "8"])
+
+    assert args.input_mode == "binned18"
+    assert args.hidden_size == 8
+
+
 def test_test_seeds_are_separate_from_validation_seeds():
     assert set(TEST_SEEDS).isdisjoint(VALIDATION_SEEDS)
 
@@ -532,20 +585,37 @@ def test_random_immigrants_preserve_population_size():
 
 def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch, tmp_path):
     class FakeAgent:
-        chromosome_length = 1
+        def __init__(self, input_mode="raw180", hidden_size=16):
+            self.input_mode = input_mode
+            self.hidden_size = hidden_size
+            self.processed_input_size = 1
+            self.chromosome_length = 1
 
     saved_next_generation = {}
 
     def fake_initialize_population(pop_size, chromosome_length):
         return np.array([[1.0], [2.0], [3.0]])
 
-    def fake_evaluate_population(population, workers=1, executor=None):
+    def fake_evaluate_population(
+        population,
+        workers=1,
+        executor=None,
+        input_mode="raw180",
+        hidden_size=16,
+    ):
         return [
             {"fitness": float(chromosome[0] * 100), "frames": int(chromosome[0]), "pipes_passed": int(chromosome[0])}
             for chromosome in population
         ]
 
-    def fake_evaluate_population_on_seed_batch(population, seeds, workers=1, executor=None):
+    def fake_evaluate_population_on_seed_batch(
+        population,
+        seeds,
+        workers=1,
+        executor=None,
+        input_mode="raw180",
+        hidden_size=16,
+    ):
         grouped = []
         for chromosome in population:
             value = int(chromosome[0])
@@ -558,7 +628,14 @@ def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch
             )
         return grouped
 
-    def fake_evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
+    def fake_evaluate_chromosome_on_seeds(
+        chromosome,
+        seeds,
+        workers=1,
+        executor=None,
+        input_mode="raw180",
+        hidden_size=16,
+    ):
         value = int(chromosome[0])
         pipes = [4, 4] if value == 2 else [value, value]
         return [
@@ -576,6 +653,7 @@ def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch
     monkeypatch.setattr(train_script, "VALIDATION_SEEDS", [10, 11])
     monkeypatch.setattr(train_script, "TEST_SEEDS", [20, 21])
     monkeypatch.setattr(train_script, "BEST_GENOME_PATH", tmp_path / "best.npy")
+    monkeypatch.setattr(train_script, "BEST_METADATA_PATH", tmp_path / "best_metadata.json")
     monkeypatch.setattr(train_script, "TRAINING_HISTORY_PATH", tmp_path / "history.csv")
     monkeypatch.setattr(train_script, "FITNESS_CHART_PATH", tmp_path / "fitness.png")
     monkeypatch.setattr(train_script, "PIPE_CHART_PATH", tmp_path / "pipes.png")
@@ -602,6 +680,66 @@ def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch
     assert rows[0]["validated_min_pipes"] == "4"
     assert np.array_equal(saved_next_generation["global_best_genome"], np.array([2.0]))
     assert np.array_equal(np.load(tmp_path / "best.npy"), np.array([2.0]))
+
+    metadata = train_script.load_genome_metadata(tmp_path / "best_metadata.json")
+    assert metadata["input_mode"] == "raw180"
+    assert metadata["hidden_size"] == 16
+    assert metadata["processed_input_size"] == 1
+    assert metadata["chromosome_length"] == 1
+    assert metadata["pipe_exponent"] == PIPE_EXPONENT
+    assert metadata["validated_mean_pipes"] == 4.0
+    assert metadata["test_validated_mean_pipes"] == 4.0
+
+
+def test_metadata_save_load_round_trip(tmp_path):
+    metadata = {
+        "input_mode": "binned18",
+        "hidden_size": 8,
+        "processed_input_size": 18,
+        "chromosome_length": 161,
+        "pipe_exponent": PIPE_EXPONENT,
+        "validated_mean_pipes": 7.0,
+    }
+
+    metadata_path = tmp_path / "metadata.json"
+    train_script.save_genome_metadata(metadata, metadata_path)
+
+    assert train_script.load_genome_metadata(metadata_path) == metadata
+
+
+def test_enjoy_constructs_agent_config_from_metadata(monkeypatch, tmp_path):
+    genome_path = tmp_path / "best.npy"
+    metadata_path = tmp_path / "metadata.json"
+    np.save(genome_path, np.zeros(161))
+    metadata_path.write_text(
+        json.dumps({"input_mode": "binned18", "hidden_size": 8}),
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def fake_evaluate_chromosome(
+        chromosome,
+        render=False,
+        frame_delay=0.0,
+        seed=None,
+        input_mode="raw180",
+        hidden_size=16,
+    ):
+        seen["input_mode"] = input_mode
+        seen["hidden_size"] = hidden_size
+        seen["chromosome_length"] = len(chromosome)
+        return {"fitness": 1.0, "frames": 1, "pipes_passed": 0}
+
+    monkeypatch.setattr(enjoy_script, "evaluate_chromosome", fake_evaluate_chromosome)
+    monkeypatch.setattr(enjoy_script, "suppress_gymnasium_observation_warnings", lambda: None)
+
+    enjoy_script.watch_best_bird(genome_path=genome_path, metadata_path=metadata_path)
+
+    assert seen == {
+        "input_mode": "binned18",
+        "hidden_size": 8,
+        "chromosome_length": 161,
+    }
 
 
 def test_plot_lines_are_simple(monkeypatch):

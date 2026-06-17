@@ -33,7 +33,14 @@ def calculate_fitness(
     return float(frames_survived + (pipes_passed**pipe_exponent) * pipe_reward)
 
 
-def evaluate_chromosome(chromosome, render=False, frame_delay=0.0, seed=None):
+def evaluate_chromosome(
+    chromosome,
+    render=False,
+    frame_delay=0.0,
+    seed=None,
+    input_mode="raw180",
+    hidden_size=16,
+):
     """
     Run one game of Flappy Bird and return fitness, frames, and pipes passed.
     """
@@ -46,7 +53,7 @@ def evaluate_chromosome(chromosome, render=False, frame_delay=0.0, seed=None):
         np.random.seed(seed)
         if hasattr(env.action_space, "seed"):
             env.action_space.seed(seed)
-    agent = BirdAgent()
+    agent = BirdAgent(input_mode=input_mode, hidden_size=hidden_size)
 
     if seed is None:
         observation, info = env.reset()
@@ -77,27 +84,68 @@ def evaluate_chromosome(chromosome, render=False, frame_delay=0.0, seed=None):
 
 
 def _evaluate_seeded_job(job):
-    chromosome, seed = job
-    return evaluate_chromosome(chromosome, seed=seed)
+    chromosome, seed, input_mode, hidden_size = job
+    if input_mode == "raw180" and hidden_size == 16:
+        return evaluate_chromosome(chromosome, seed=seed)
+    return evaluate_chromosome(
+        chromosome,
+        seed=seed,
+        input_mode=input_mode,
+        hidden_size=hidden_size,
+    )
 
 
-def evaluate_population(population, workers=1, executor=None):
+def _evaluate_architecture_job(job):
+    chromosome, input_mode, hidden_size = job
+    return evaluate_chromosome(
+        chromosome,
+        input_mode=input_mode,
+        hidden_size=hidden_size,
+    )
+
+
+def evaluate_population(
+    population,
+    workers=1,
+    executor=None,
+    input_mode="raw180",
+    hidden_size=16,
+):
     """Evaluate chromosomes sequentially or in parallel across processes."""
     chromosomes = list(population)
 
+    if input_mode == "raw180" and hidden_size == 16:
+        if workers <= 1:
+            return [evaluate_chromosome(chromosome) for chromosome in chromosomes]
+
+        if executor is not None:
+            return list(executor.map(evaluate_chromosome, chromosomes))
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            return list(executor.map(evaluate_chromosome, chromosomes))
+
+    jobs = [(chromosome, input_mode, hidden_size) for chromosome in chromosomes]
+
     if workers <= 1:
-        return [evaluate_chromosome(chromosome) for chromosome in chromosomes]
+        return [_evaluate_architecture_job(job) for job in jobs]
 
     if executor is not None:
-        return list(executor.map(evaluate_chromosome, chromosomes))
+        return list(executor.map(_evaluate_architecture_job, jobs))
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(evaluate_chromosome, chromosomes))
+        return list(executor.map(_evaluate_architecture_job, jobs))
 
 
-def evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
+def evaluate_chromosome_on_seeds(
+    chromosome,
+    seeds,
+    workers=1,
+    executor=None,
+    input_mode="raw180",
+    hidden_size=16,
+):
     """Evaluate one chromosome on a fixed list of seeds."""
-    jobs = [(chromosome, seed) for seed in seeds]
+    jobs = [(chromosome, seed, input_mode, hidden_size) for seed in seeds]
 
     if workers <= 1:
         return [_evaluate_seeded_job(job) for job in jobs]
@@ -109,11 +157,18 @@ def evaluate_chromosome_on_seeds(chromosome, seeds, workers=1, executor=None):
         return list(executor.map(_evaluate_seeded_job, jobs))
 
 
-def evaluate_population_on_seed_batch(population, seeds, workers=1, executor=None):
+def evaluate_population_on_seed_batch(
+    population,
+    seeds,
+    workers=1,
+    executor=None,
+    input_mode="raw180",
+    hidden_size=16,
+):
     """Evaluate every chromosome on the same fixed seed batch."""
     candidate_list = list(population)
     jobs = [
-        (chromosome, seed)
+        (chromosome, seed, input_mode, hidden_size)
         for chromosome in candidate_list
         for seed in seeds
     ]
