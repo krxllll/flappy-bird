@@ -1,198 +1,70 @@
 # Flappy Bird Neuroevolution Project Report
 
-## 1. Introduction
+## 1. Goal and project structure
 
-This project trains an autonomous Flappy Bird agent using neuroevolution. The agent is controlled by a small feedforward neural network, but the network is not trained using gradient descent or backpropagation. Instead, all network weights and biases are optimized by a Genetic Algorithm.
+This project trains a Flappy Bird controller with a genetic algorithm rather than gradient descent. Each chromosome is a flat array containing every weight and bias of a small feedforward neural network. The algorithm evaluates birds in the Gymnasium Flappy Bird environment, selects stronger chromosomes, and creates new candidates through crossover and mutation.
 
-In this approach, each possible agent is represented as a chromosome. The chromosome stores the complete neural network parameters as a flat vector of numbers. A population of these chromosomes is evaluated in the Flappy Bird environment, and better-performing chromosomes are selected, crossed over, mutated, and carried forward into later generations.
+The project separates reusable code in `src/flappy_bird_ai/`, runnable programs in `scripts/`, tests in `tests/`, and generated training artifacts in `outputs/`. This replaced the original, less structured prototype and makes the training logic easier to inspect and test.
 
-## 2. Initial Project State
+## 2. Agent architecture
 
-The initial project state was functional but not organized as a clean Python project. Source files were not separated clearly from environment files, and some project files were placed incorrectly, possibly inside the `.venv` virtual environment directory.
+The environment supplies 180 observation values. The controller can use all 180 values (`raw180`), average adjacent groups of 6 into 30 values (`binned30`), or average groups of 10 into 18 values (`binned18`). The hidden layer size is configurable; it uses ReLU, followed by one sigmoid output. A score above 0.5 selects flap, and any other score selects no flap.
 
-There was no clean separation between reusable project logic, executable scripts, generated outputs, and tests. Files such as `agent.py`, `simulation.py`, `train.py`, `enjoy.py`, and `sanity_check.py` existed, but they were not arranged in a maintainable package structure.
-
-The training process could run, but it was limited and not well documented. The original implementation focused mainly on survival time and saved the best genome in a simple way, which made later training improvements harder to reason about and verify.
-
-## 3. Project Restructuring
-
-The project was reorganized into a clean Python project layout. Source code was moved out of `.venv`, and reusable modules were placed under `src/flappy_bird_ai/`. Executable entry-point scripts were placed under `scripts/`, generated files were placed under `outputs/`, and tests were placed under `tests/`.
-
-The `.gitignore` file was also adjusted to avoid committing virtual environments, Python cache files, pytest cache files, generated genomes, plots, and CSV logs.
-
-The final structure is conceptually organized as follows:
+The chromosome length follows:
 
 ```text
-README.md
-requirements.txt
-.gitignore
-src/flappy_bird_ai/agent.py
-src/flappy_bird_ai/simulation.py
-src/flappy_bird_ai/genetic.py
-scripts/sanity_check.py
-scripts/train.py
-scripts/enjoy.py
-outputs/
-tests/
+processed_inputs * hidden_size + hidden_size + hidden_size + 1
 ```
 
-This structure separates project responsibilities clearly. The `src/` directory contains reusable implementation logic, `scripts/` contains runnable programs, `outputs/` stores generated training artifacts, and `tests/` contains automated checks.
+The default `raw180` mode with 16 hidden units needs 2913 parameters. With 8 hidden units, `binned30` needs 257 and `binned18` needs 161. Training writes the selected architecture to genome metadata, and visual playback reads it so the saved chromosome is mapped to the correct network.
 
-## 4. Neural Network Agent
+## 3. Evaluation and fitness
 
-The Flappy Bird agent uses a small feedforward neural network. The input is a 180-dimensional observation vector from the Flappy Bird environment. This vector is passed through one hidden layer with 16 neurons using a ReLU activation function. The network then produces a single sigmoid output.
-
-The sigmoid output is converted into a binary action:
-
-- `1`: flap
-- `0`: do nothing
-
-All weights and biases are stored in a flat one-dimensional chromosome. The chromosome is mapped back into weight matrices and bias vectors whenever the agent makes a prediction.
-
-The chromosome length is calculated as follows:
-
-- `180 x 16 = 2880` input-to-hidden weights
-- `16` hidden biases
-- `16` hidden-to-output weights
-- `1` output bias
-- total: `2880 + 16 + 16 + 1 = 2913` parameters
-
-The neural network architecture has remained unchanged throughout the project improvements.
-
-## 5. Initial Genetic Algorithm
-
-The initial training approach used a standard Genetic Algorithm. A population of candidate chromosomes was created randomly. Each chromosome represented one bird agent and was evaluated by running the Flappy Bird environment.
-
-After evaluation, better candidates were selected. Crossover combined values from two parent chromosomes to create a child chromosome, while mutation introduced random variation into individual chromosome values. The best genome was saved so it could later be loaded by the visual playback script.
-
-This approach provided a basic neuroevolution pipeline, but the original evaluation and selection logic did not fully prioritize the true objective of the game: passing pipes reliably.
-
-## 6. Pipe-Based Evaluation Improvements
-
-The evaluation logic was improved from a mostly survival-based approach into a pipe-aware evaluation system. Evaluation now tracks:
-
-- frames survived
-- pipes passed
-- final fitness score
-
-The evaluation function returns structured metrics such as `fitness`, `frames`, and `pipes_passed`, instead of only returning a single number. This makes the training loop easier to inspect, log, validate, and test.
-
-The fitness function gives a continuous reward for survival while strongly rewarding pipe passing. This change was important because survival time alone can reward passive behavior, such as staying alive briefly without actually making progress through pipes. Passing pipes is the real objective of Flappy Bird, so pipe-based reward gives the Genetic Algorithm better learning pressure.
-
-## 7. Pipe Threshold and Early Stopping
-
-A configurable pipe target was added to the training process. The training loop can detect when an agent reaches a required number of pipes.
-
-Early stopping can be enabled, but the stopping condition was improved so that training does not stop after a single lucky run. Instead, early stopping is tied to validated champion performance. This makes the target logic more reliable and prevents a one-off high score from ending training prematurely.
-
-## 8. Global Best and Hall-of-Fame Tracking
-
-Global best tracking was added to preserve the best genome discovered across all generations. This is separate from generation best performance.
-
-This distinction is important because the best bird in a particular generation may perform well due to randomness, while later generations may perform worse. Without hall-of-fame tracking, a strong discovered strategy could be lost. The global best mechanism prevents this by saving and preserving the strongest validated champion.
-
-The global best can also be injected into future generations. This helps stabilize training by ensuring that the best known strategy remains present in the population. Candidate champions are compared primarily by pipe performance and then by fitness or stability-aware scoring.
-
-## 9. Champion Validation
-
-Champion validation was added to reduce the effect of lucky single runs. Strong candidates are evaluated over multiple episodes before they are allowed to replace the saved global champion.
-
-Validated champion metrics include:
-
-- validated mean pipes
-- validated minimum pipes
-- validated maximum pipes
-- validated pipe standard deviation
-- validated mean fitness
-
-This separates raw generation performance from reliable champion performance. The saved champion is based on validation, not only on one high-scoring generation result.
-
-## 10. Stability-Aware Champion Selection
-
-Champion scoring was improved to prefer consistent agents rather than agents that occasionally achieve a high score. The scoring formula considers mean pipes, minimum pipes, and the standard deviation of pipe counts.
-
-The stability-aware score is conceptually:
+Each population member plays one episode during a generation. Evaluation records frames survived, pipes passed, and fitness. The current fitness function is:
 
 ```text
-champion_score = validated_mean_pipes + 0.3 * validated_min_pipes - 0.1 * validated_std_pipes
+fitness = frames_survived + (pipes_passed ** 1.75) * 1000
 ```
 
-This rewards agents that pass many pipes on average, gives extra credit to agents with better worst-case performance, and penalizes agents whose results vary too much. The goal is to produce a bird that performs reliably, not only occasionally.
+The pipe exponent and reward are named constants in `src/flappy_bird_ai/simulation.py`. Population ranking prioritizes pipes passed, then fitness, then frames survived. This prevents a long survival run with fewer pipes from outranking a bird that made more progress through the course.
 
-## 11. Adaptive Mutation and Champion-Based Offspring
+## 4. Validation and champion selection
 
-Mutation behavior was improved to support more stable training. Mutation rate and mutation strength can be reduced after a breakthrough, such as when the validated global champion reaches a significant pipe count.
+The top five candidates from each generation are evaluated on the same 20 fixed validation seeds, 10000 through 10019. The results include mean, minimum, maximum, and standard deviation of pipes passed, plus mean fitness. A candidate becomes the global best when it improves validated mean pipes, then validated minimum pipes, then validated mean fitness.
 
-This helps avoid destroying strong behavior after the agent learns a useful strategy. Early training still allows more exploration, while later training becomes more conservative around successful behaviors.
+The saved champion is re-evaluated on the validation seeds each generation. The global best is retained across generations, independent of a single generation's raw best result. Early stopping uses the global best's validated mean pipe count against a target of 10 by default. The target can be changed, and early stopping can be disabled.
 
-Champion-based offspring were also added. A configurable part of the next population can be generated as small mutations of the validated champion. This stabilizes the population around known successful strategies while still preserving diversity through crossover and random new chromosomes.
+After training, the saved champion is evaluated on 50 separate test seeds, 20000 through 20049. These held-out metrics are stored separately from validation metrics in the metadata file.
 
-## 12. Logging and Visualization
+## 5. Population renewal and mutation
 
-Training now produces several output artifacts:
+Each new generation begins with an unchanged copy of the validated global best and up to five unchanged elites. Approximately 15% of the population consists of small mutations of the champion. Most remaining places are filled by uniform crossover between parents from the top 40% of the ranked population, followed by normal Gaussian mutation. About 10% are fresh random chromosomes.
 
-- `outputs/training_history.csv`
-- `outputs/fitness_progression.png`
-- `outputs/pipe_progression.png`
+Normal offspring use a mutation rate of 0.15 by default. The `--mutation-rate` option accepts a rate strictly between 0 and 1. Normal mutation strength decreases from 0.2 toward a floor of 0.05 over the configured number of generations. Champion offspring use separate fixed settings: mutation rate 0.03 and strength 0.02. This distinction limits changes to copies of the known champion while allowing normal offspring to explore more broadly.
 
-The training history tracks metrics such as:
+## 6. Parallel evaluation and stopping
 
-- generation best fitness
-- mean fitness
-- validated champion fitness
-- generation best pipes
-- mean pipes
-- validated champion mean pipes
-- validated champion minimum pipes
-- moving averages for better trend visualization
-- mutation parameters where applicable
+The training script can evaluate population members and validation runs across worker processes. By default it chooses one fewer worker than the available CPU count, with a minimum of one; `--workers` or `--no-parallel` changes this. A process pool is reused across generations.
 
-The plots help distinguish raw generation spikes from validated champion performance. Moving averages make long-term trends easier to interpret.
+The default training limit is 100 generations. Training can stop earlier when the validated global-best mean reaches the target. `--generations`, `--target-pipes`, and `--no-early-stop` control these conditions.
 
-## 13. Current Results
+## 7. Outputs and interpretation
 
-The latest observed results show a significant improvement over the initial version:
+Training produces:
 
-- generation best reached approximately 30 pipes
-- validated champion mean pipes reached approximately 7.6
-- validated champion max pipes reached approximately 26
-- mean population pipes reached approximately 4.66
-- results are significantly better than the initial 3-5 pipe range
+- `outputs/best_bird_genome.npy`: the validated global-best chromosome.
+- `outputs/best_bird_metadata.json`: architecture, mutation settings at champion selection, validation metrics, and held-out test metrics.
+- `outputs/training_history.csv`: raw generation best and mean metrics, validated global-best metrics, mutation settings, population ratios, worker count, and timing.
+- `outputs/fitness_progression.png` and `outputs/pipe_progression.png`: simple curves for raw generation performance and validated global-best performance.
 
-However, the model is still not perfectly stable. Validated minimum pipes can remain low, which means the champion can still fail early in some episodes. This indicates that the algorithm can discover strong agents, but consistent performance remains more difficult than occasional high performance.
+The metadata and genome form a pair for replay with `scripts/enjoy.py`. The CSV and plots show how a particular run changed over time; validation and held-out test metrics should be compared separately. A high maximum pipe count alone does not establish consistent performance, especially when the minimum remains low.
 
-The current interpretation is that the algorithm now discovers much stronger strategies, population-level performance has improved, and validation prevents overestimating lucky runs. Further stabilization would likely require stronger consistency pressure, more validation episodes, additional selection refinements, or longer training.
+This report does not assign a single current pipe score to the project. Run results depend on the chosen architecture, mutation rate, number of generations, and game episodes. Generated outputs are not a versioned benchmark in the repository.
 
-## 14. Testing
+## 8. Testing
 
-Tests were added and updated to verify important parts of the project. The test suite checks:
+The automated tests cover chromosome length and weight mapping, observation aggregation, binary predictions, seeded evaluation, fitness and pipe-first ranking, champion comparison, early stopping, population preservation, mutation settings, training history, metadata, playback configuration, and plot contents. They use controlled inputs and mocked game behavior where appropriate; passing tests verifies the implementation paths, not the performance of a newly trained bird.
 
-- chromosome length
-- prediction output format
-- fitness calculation
-- pipe-based comparison
-- global best logic
-- champion validation logic
-- adaptive mutation behavior
-- safe elitism and copying behavior
+## 9. Conclusion
 
-These tests help ensure that the neural network architecture remains correct, that the Genetic Algorithm preserves strong agents safely, and that training stability mechanisms behave as intended.
-
-## 15. Conclusion
-
-The project evolved from a basic, unstructured neuroevolution prototype into a cleaner and more robust training system.
-
-The current implementation includes:
-
-- proper project structure
-- pipe-aware fitness
-- global champion preservation
-- validated champion selection
-- stability-aware scoring
-- adaptive mutation
-- champion-based offspring generation
-- improved logging and plots
-- better testing support
-
-The agent architecture remains simple and unchanged, but the training pipeline is now more reliable, easier to inspect, and better suited for a university project submission.
-
+The current system combines configurable observation preprocessing and network size with a validation-based genetic algorithm. It preserves a global champion, records the settings and measurements needed to inspect a run, and can replay saved genomes with the correct architecture. Actual game performance should be reported from a named training run and its separate validation and held-out test results.

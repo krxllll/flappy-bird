@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.0
+
+Configurable agent architecture and mutation settings update.
+
+- Simplified the training baseline: validate the top 5 candidates on 20 fixed seeds, compare champions by validated mean pipes, minimum pipes, and mean fitness, and evaluate the saved champion on 50 separate test seeds.
+- Replaced dynamic champion ratios, patience and breakthrough mutation adjustments with fixed offspring and immigrant ratios and a generation-based mutation-strength schedule.
+- Simplified training history and plots to raw generation metrics and validated global-best metrics; removed champion score, revalidated generation-best fields, and moving-average lines.
+- Added configurable observation modes (`raw180`, `binned30`, and `binned18`) with mean aggregation, configurable hidden-layer size, and chromosome length derived from the selected architecture.
+- Saved architecture metadata with the best genome and made playback load that metadata.
+- Added `--mutation-rate` for normal offspring and recorded the chosen rate and the mutation strength at champion selection in genome metadata.
+- Added a GA flowchart and tests for architecture selection, mutation configuration, metadata, and playback.
+
 ## v0.6.0
 
 Training balance and exploration recovery update.

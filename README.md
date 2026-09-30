@@ -1,141 +1,46 @@
 # Flappy Bird Neuroevolution
 
-This project trains a Flappy Bird agent with a genetic algorithm and a small feedforward neural network. Each bird is represented by one chromosome: a flat NumPy array containing all neural-network weights and biases.
+This project trains a Flappy Bird agent with a genetic algorithm (GA). A chromosome is a flat NumPy array containing all weights and biases of a small neural network. See [the GA flowchart](docs/ga_flowchart.md) for the training sequence.
 
-The neural network architecture is unchanged:
+## Agent architecture
 
-- 180 inputs
-- 16 hidden neurons
-- 1 output
-- 2913 chromosome parameters
+The environment provides 180 observation values. The agent can use them directly or average adjacent groups before passing them to a network with one configurable ReLU hidden layer and one sigmoid output. An output above 0.5 means flap; otherwise the bird does nothing.
 
-The network output is converted into a binary action: flap or do nothing.
+| Input mode | Processed inputs | Preprocessing | Example hidden size | Chromosome length |
+| --- | ---: | --- | ---: | ---: |
+| `raw180` (default) | 180 | None | 16 | 2913 |
+| `binned30` | 30 | Mean of each group of 6 values | 8 | 257 |
+| `binned18` | 18 | Mean of each group of 10 values | 8 | 161 |
 
-## Training Approach
+The chromosome length is `processed_inputs * hidden_size + hidden_size + hidden_size + 1`. The examples show one hidden size for each input mode; `--hidden-size` can be any positive integer.
 
-Normal population evaluation stays fast: each chromosome plays one episode. Generation best and mean metrics are kept as raw per-generation telemetry.
+## Training and validation
 
-Fitness is pipe-first:
+By default, training starts with 50 random chromosomes and runs for at most 100 generations. Each chromosome plays one episode during population evaluation. Candidates are ranked by pipes passed, then fitness, then frames survived:
 
 ```text
 fitness = frames_survived + (pipes_passed ** PIPE_EXPONENT) * PIPE_REWARD
 ```
 
-`PIPE_REWARD` and `PIPE_EXPONENT` are defined in `src/flappy_bird_ai/simulation.py`. The default exponent is `1.5`, which keeps pipe passing important while reducing extreme single-run fitness spikes.
+`PIPE_REWARD` is 1000 and `PIPE_EXPONENT` is 1.75 in `src/flappy_bird_ai/simulation.py`.
 
-## Validation-Based Champion Selection
+The top five candidates in each generation are validated on the same 20 seeds (`10000` through `10019`). A candidate replaces the saved global best when it improves validated mean pipes, then minimum pipes, then mean fitness. The saved champion is re-evaluated each generation. Training stops early when its validated mean pipes reaches the target (default: 10), unless `--no-early-stop` is used. After training, the champion is also evaluated on 50 separate test seeds (`20000` through `20049`).
 
-The saved champion is never chosen from a single lucky generation run. Top candidates that can match or beat the current champion are re-evaluated with `VALIDATION_EPISODES = 20`.
+Each next generation keeps the global best and up to five elites unchanged. It adds small mutations of the champion for 15% of the population, fills most remaining slots with crossover and mutation from the top 40% parent pool, and reserves 10% for random immigrants.
 
-Validated champion stats include:
+Normal offspring have a default mutation rate of 0.15. `--mutation-rate` overrides it with a value strictly between 0 and 1. Normal mutation strength decreases from 0.2 toward a minimum of 0.05 over the configured generations. Champion offspring use separate, fixed mutation settings: rate 0.03 and strength 0.02.
 
-- `validated_mean_pipes`
-- `validated_min_pipes`
-- `validated_max_pipes`
-- `validated_std_pipes`
-- `validated_mean_fitness`
-- `champion_score`
+## Setup and commands
 
-The champion score rewards consistency:
-
-```text
-champion_score = validated_mean_pipes + 0.3 * validated_min_pipes - 0.1 * validated_std_pipes
-```
-
-Global champion comparison prioritizes validated mean pipes first, then uses this stability-aware score as a tie-breaker, then validated mean fitness as the final tie-breaker. `outputs/best_bird_genome.npy` is saved only when validation confirms improvement.
-
-## Population Stability
-
-Every new generation includes:
-
-- The validated global best copied unchanged.
-- About 35% conservative small mutations of the global best.
-- Most remaining birds from crossover among top candidates.
-- About 10% random new chromosomes for diversity.
-
-Elites and the global best are copied with `.copy()` so they are not mutated accidentally.
-
-Champion offspring use smaller mutation settings than normal offspring:
-
-```text
-CHAMPION_MUTATION_RATE = 0.03
-CHAMPION_MUTATION_STRENGTH = 0.02
-```
-
-## Adaptive Mutation
-
-Mutation strength cools down over training. After the validated global best reaches `BREAKTHROUGH_PIPES = 10`, mutation is tightened further:
-
-```text
-mutation_rate = min(current_mutation_rate, 0.05)
-mutation_strength = min(current_mutation_strength, 0.03)
-```
-
-This keeps exploration early and makes late-stage improvements less destructive.
-
-If the champion does not improve for several generations, patience-based diversity slightly increases the random-agent ratio and normal mutation strength. When the champion improves, the patience counter resets and normal adaptive settings resume.
-
-## Parallel Training
-
-Flappy Bird environment simulation is CPU-bound. GPU acceleration is not useful for this project unless the environment is rewritten for batched GPU simulation. The practical speedup is multiprocessing across CPU cores.
-
-Population evaluation can run in parallel:
-
-```powershell
-python scripts/train.py --workers 8
-python scripts/train.py --workers 16 --generations 10
-```
-
-The training script reuses one process pool across the whole run, so worker processes are not recreated for every generation. Each generation prints timing for population evaluation, top-candidate revalidation, champion validation, next-generation creation, and total generation time.
-
-To force single-process evaluation:
-
-```powershell
-python scripts/train.py --workers 1
-python scripts/train.py --no-parallel
-```
-
-## Outputs
-
-Training writes generated files into `outputs/`:
-
-- `outputs/best_bird_genome.npy`
-- `outputs/training_history.csv`
-- `outputs/fitness_progression.png`
-- `outputs/pipe_progression.png`
-
-The CSV includes raw generation metrics, revalidated generation best fitness, validated champion metrics, champion score, patience count, mutation rate, mutation strength, champion offspring ratio, and random-agent ratio. Plots include raw best/mean lines plus 5-generation moving averages, with raw generation best fitness shown as a secondary spike-prone metric.
-
-Generated `.npy`, `.png`, and `.csv` files are ignored by git.
-
-## Setup On Windows PowerShell
-
-Create a virtual environment:
+On Windows PowerShell, create a virtual environment and install dependencies:
 
 ```powershell
 python -m venv .venv
-```
-
-Activate it:
-
-```powershell
 .\.venv\Scripts\Activate.ps1
-```
-
-If PowerShell blocks activation, allow scripts for the current terminal session:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-Install dependencies:
-
-```powershell
-python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Commands
+If PowerShell blocks activation, run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that terminal and activate the environment again.
 
 Run a quick environment check:
 
@@ -143,26 +48,38 @@ Run a quick environment check:
 python scripts/sanity_check.py
 ```
 
-Run evolutionary training:
+Train with the defaults, or choose an architecture and mutation rate:
 
 ```powershell
 python scripts/train.py
+python scripts/train.py --input-mode binned18 --hidden-size 8 --mutation-rate 0.19 --workers 8 --generations 50
 ```
 
-Run the saved best bird visually:
+The default worker count is one fewer than the available CPU count, with a minimum of one. Use `--workers 1` or `--no-parallel` for sequential evaluation. Use `--target-pipes N` to change the early-stop target. Run `python scripts/train.py --help` for all options.
+
+Replay the saved champion:
 
 ```powershell
 python scripts/enjoy.py
 ```
 
+Playback reads the saved metadata to reconstruct the agent architecture. Keep the genome `.npy` file and its metadata `.json` file together; `--genome` and `--metadata` can select another pair.
+
 Run tests:
-
-```powershell
-pytest
-```
-
-If `pytest` is not on PATH, run it through the virtual environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
+
+## Generated outputs
+
+Training writes these files under `outputs/`:
+
+- `best_bird_genome.npy`: validated global best chromosome.
+- `best_bird_metadata.json`: architecture, mutation settings at champion selection, validation metrics, and held-out test metrics.
+- `training_history.csv`: per-generation raw fitness, pipe and frame metrics; validated global-best metrics; mutation settings; population ratios; and timing.
+- `fitness_progression.png` and `pipe_progression.png`: raw generation best and mean alongside validated global-best trends.
+
+These are run artifacts. Results depend on the chosen architecture, mutation rate, generation count, and random episodes.
+
+Git ignores the generated `.npy`, `.png`, and `.csv` files in `outputs/`; inspect the metadata JSON before adding it to a commit.
