@@ -467,6 +467,24 @@ def test_architecture_arguments_are_parsed():
     assert args.hidden_size == 8
 
 
+def test_default_mutation_rate_argument_preserves_configured_default():
+    args = train_script.parse_args([])
+
+    assert args.mutation_rate is None
+
+
+def test_mutation_rate_argument_overrides_default():
+    args = train_script.parse_args(["--mutation-rate", "0.10"])
+
+    assert args.mutation_rate == 0.10
+
+
+def test_invalid_mutation_rate_arguments_are_rejected():
+    for value in ("0", "1", "-0.1", "1.2", "not-a-number"):
+        with pytest.raises(SystemExit):
+            train_script.parse_args(["--mutation-rate", value])
+
+
 def test_test_seeds_are_separate_from_validation_seeds():
     assert set(TEST_SEEDS).isdisjoint(VALIDATION_SEEDS)
 
@@ -571,6 +589,31 @@ def test_champion_offspring_use_small_mutation_without_mutating_original(monkeyp
     assert mutation_calls[0][1] == 0.03
 
 
+def test_normal_offspring_use_passed_mutation_rate(monkeypatch):
+    import flappy_bird_ai.genetic as genetic
+
+    mutation_rates = []
+
+    def fake_mutate(chromosome, mutation_strength, mutation_rate):
+        mutation_rates.append(mutation_rate)
+        return chromosome
+
+    monkeypatch.setattr(genetic, "mutate", fake_mutate)
+
+    genetic.create_next_generation(
+        np.array([np.full(5, 3.0), np.full(5, 2.0), np.full(5, 1.0)]),
+        pop_size=3,
+        elite_size=0,
+        mutation_rate=0.19,
+        mutation_strength=0.2,
+        champion_offspring_ratio=0.0,
+        random_immigrant_ratio=0.0,
+    )
+
+    assert mutation_rates
+    assert set(mutation_rates) == {0.19}
+
+
 def test_random_immigrants_preserve_population_size():
     next_generation = create_next_generation(
         np.array([np.full(5, 3.0), np.full(5, 2.0), np.full(5, 1.0)]),
@@ -583,7 +626,11 @@ def test_random_immigrants_preserve_population_size():
     assert next_generation.shape == (10, 5)
 
 
-def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch, tmp_path):
+def test_training_loop_writes_simple_history_and_updates_global_best(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
     class FakeAgent:
         def __init__(self, input_mode="raw180", hidden_size=16):
             self.input_mode = input_mode
@@ -645,6 +692,8 @@ def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch
 
     def fake_create_next_generation(population, **kwargs):
         saved_next_generation["global_best_genome"] = kwargs["global_best_genome"].copy()
+        saved_next_generation["mutation_rate"] = kwargs["mutation_rate"]
+        saved_next_generation["mutation_strength"] = kwargs["mutation_strength"]
         return population
 
     monkeypatch.setattr(train_script, "BirdAgent", FakeAgent)
@@ -666,20 +715,27 @@ def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch
 
     train_script.train_evolutionary_ai(
         workers=1,
-        generations=1,
+        generations=2,
         target_pipes=10,
         early_stop_on_target=False,
+        mutation_rate=0.12,
     )
+    captured = capsys.readouterr()
 
     with (tmp_path / "history.csv").open(newline="", encoding="utf-8") as csv_file:
         reader = csv.DictReader(csv_file)
         rows = list(reader)
 
     assert reader.fieldnames == train_script.CSV_FIELDNAMES
+    assert len(rows) == 2
     assert rows[0]["validated_mean_pipes"] == "4.0"
     assert rows[0]["validated_min_pipes"] == "4"
+    assert rows[0]["mutation_rate"] == "0.12"
     assert np.array_equal(saved_next_generation["global_best_genome"], np.array([2.0]))
+    assert saved_next_generation["mutation_rate"] == 0.12
     assert np.array_equal(np.load(tmp_path / "best.npy"), np.array([2.0]))
+    assert "Mutation rate: 0.120" in captured.out
+    assert "Mutation: 0.120/" in captured.out
 
     metadata = train_script.load_genome_metadata(tmp_path / "best_metadata.json")
     assert metadata["input_mode"] == "raw180"
@@ -687,6 +743,9 @@ def test_training_loop_writes_simple_history_and_updates_global_best(monkeypatch
     assert metadata["processed_input_size"] == 1
     assert metadata["chromosome_length"] == 1
     assert metadata["pipe_exponent"] == PIPE_EXPONENT
+    assert metadata["mutation_rate"] == 0.12
+    assert metadata["mutation_strength"] == train_script.INITIAL_MUTATION_STRENGTH
+    assert metadata["mutation_strength"] > saved_next_generation["mutation_strength"]
     assert metadata["validated_mean_pipes"] == 4.0
     assert metadata["test_validated_mean_pipes"] == 4.0
 
@@ -698,6 +757,8 @@ def test_metadata_save_load_round_trip(tmp_path):
         "processed_input_size": 18,
         "chromosome_length": 161,
         "pipe_exponent": PIPE_EXPONENT,
+        "mutation_rate": 0.1,
+        "mutation_strength": 0.2,
         "validated_mean_pipes": 7.0,
     }
 

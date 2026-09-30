@@ -19,6 +19,7 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     CHAMPION_OFFSPRING_RATIO,
     EARLY_STOP_ON_TARGET,
     GENERATIONS,
+    INITIAL_MUTATION_STRENGTH,
     MUTATION_RATE,
     POPULATION_SIZE,
     RANDOM_IMMIGRANT_RATIO,
@@ -80,7 +81,13 @@ def save_training_history(history, path):
         writer.writerows(history)
 
 
-def build_genome_metadata(agent, validation_metrics=None, test_metrics=None):
+def build_genome_metadata(
+    agent,
+    validation_metrics=None,
+    test_metrics=None,
+    mutation_rate=None,
+    mutation_strength=None,
+):
     metadata = {
         "input_mode": agent.input_mode,
         "hidden_size": agent.hidden_size,
@@ -88,6 +95,10 @@ def build_genome_metadata(agent, validation_metrics=None, test_metrics=None):
         "chromosome_length": agent.chromosome_length,
         "pipe_exponent": PIPE_EXPONENT,
     }
+    if mutation_rate is not None:
+        metadata["mutation_rate"] = mutation_rate
+    if mutation_strength is not None:
+        metadata["mutation_strength"] = mutation_strength
     if validation_metrics:
         metadata.update(validation_metrics)
     if test_metrics:
@@ -234,6 +245,22 @@ def resolve_worker_count(requested_workers=None, no_parallel=False):
     return max(1, requested_workers)
 
 
+def parse_mutation_rate(value):
+    try:
+        mutation_rate = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "mutation rate must be a number in the range 0.0 < mutation_rate < 1.0"
+        ) from exc
+
+    if not 0.0 < mutation_rate < 1.0:
+        raise argparse.ArgumentTypeError(
+            "mutation rate must be in the range 0.0 < mutation_rate < 1.0"
+        )
+
+    return mutation_rate
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Train the Flappy Bird GA agent.")
     parser.add_argument(
@@ -276,6 +303,15 @@ def parse_args(argv=None):
         default=16,
         help="Number of hidden units in the controller network.",
     )
+    parser.add_argument(
+        "--mutation-rate",
+        type=parse_mutation_rate,
+        default=None,
+        help=(
+            "Mutation probability for normal offspring. "
+            f"Defaults to the configured value ({MUTATION_RATE})."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -294,6 +330,7 @@ def train_evolutionary_ai(
     early_stop_on_target=None,
     input_mode="raw180",
     hidden_size=16,
+    mutation_rate=None,
 ):
     suppress_gymnasium_observation_warnings()
 
@@ -305,6 +342,10 @@ def train_evolutionary_ai(
         target_pipes = TARGET_PIPES
     if early_stop_on_target is None:
         early_stop_on_target = EARLY_STOP_ON_TARGET
+    if mutation_rate is None:
+        mutation_rate = MUTATION_RATE
+    else:
+        mutation_rate = parse_mutation_rate(str(mutation_rate))
 
     agent_meta = BirdAgent(input_mode=input_mode, hidden_size=hidden_size)
     chromosome_length = agent_meta.chromosome_length
@@ -315,6 +356,7 @@ def train_evolutionary_ai(
     training_history = []
     global_best_genome = None
     global_best_result = None
+    global_best_mutation_strength = None
     total_start_time = time.perf_counter()
 
     print(
@@ -323,6 +365,8 @@ def train_evolutionary_ai(
         f"Workers: {workers} | Target pipes: {target_pipes} | "
         f"Input mode: {input_mode} | Hidden size: {hidden_size} | "
         f"Chromosome length: {chromosome_length} | "
+        f"Mutation rate: {mutation_rate:.3f} | "
+        f"Initial mutation strength: {INITIAL_MUTATION_STRENGTH:.3f} | "
         f"Validation seeds: {len(VALIDATION_SEEDS)} | "
         f"Early stopping: {'enabled' if early_stop_on_target else 'disabled'}\n"
     )
@@ -338,6 +382,7 @@ def train_evolutionary_ai(
     try:
         for generation_index in range(generations):
             generation = generation_index + 1
+            mutation_strength = adaptive_mutation_strength(generation_index, generations)
             generation_start_time = time.perf_counter()
 
             population_eval_start_time = time.perf_counter()
@@ -371,9 +416,15 @@ def train_evolutionary_ai(
                 if is_better_result(validation_result, global_best_result):
                     global_best_result = validation_result
                     global_best_genome = population[candidate_index].copy()
+                    global_best_mutation_strength = mutation_strength
                     np.save(BEST_GENOME_PATH, global_best_genome)
                     save_genome_metadata(
-                        build_genome_metadata(agent_meta, global_best_result),
+                        build_genome_metadata(
+                            agent_meta,
+                            validation_metrics=global_best_result,
+                            mutation_rate=mutation_rate,
+                            mutation_strength=global_best_mutation_strength,
+                        ),
                         BEST_METADATA_PATH,
                     )
                     print(
@@ -398,14 +449,17 @@ def train_evolutionary_ai(
                     global_best_result = champion_result
                     np.save(BEST_GENOME_PATH, global_best_genome)
                     save_genome_metadata(
-                        build_genome_metadata(agent_meta, global_best_result),
+                        build_genome_metadata(
+                            agent_meta,
+                            validation_metrics=global_best_result,
+                            mutation_rate=mutation_rate,
+                            mutation_strength=global_best_mutation_strength,
+                        ),
                         BEST_METADATA_PATH,
                     )
 
             validation_time = time.perf_counter() - validation_start_time
 
-            mutation_strength = adaptive_mutation_strength(generation_index, generations)
-            mutation_rate = MUTATION_RATE
             random_immigrant_ratio = RANDOM_IMMIGRANT_RATIO
             champion_offspring_ratio = CHAMPION_OFFSPRING_RATIO
             should_stop = should_stop_training(
@@ -493,6 +547,8 @@ def train_evolutionary_ai(
                     agent_meta,
                     validation_metrics=global_best_result,
                     test_metrics=test_result,
+                    mutation_rate=mutation_rate,
+                    mutation_strength=global_best_mutation_strength,
                 ),
                 BEST_METADATA_PATH,
             )
@@ -529,6 +585,7 @@ def main():
         early_stop_on_target=not args.no_early_stop,
         input_mode=args.input_mode,
         hidden_size=args.hidden_size,
+        mutation_rate=args.mutation_rate,
     )
 
 
