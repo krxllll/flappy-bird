@@ -1,6 +1,7 @@
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 import csv
+import json
 import os
 import sys
 import time
@@ -18,6 +19,7 @@ from flappy_bird_ai.genetic import (  # noqa: E402
     CHAMPION_OFFSPRING_RATIO,
     EARLY_STOP_ON_TARGET,
     GENERATIONS,
+    INITIAL_MUTATION_STRENGTH,
     MUTATION_RATE,
     POPULATION_SIZE,
     RANDOM_IMMIGRANT_RATIO,
@@ -42,6 +44,7 @@ from flappy_bird_ai.simulation import (  # noqa: E402
 
 
 BEST_GENOME_PATH = PROJECT_ROOT / "outputs" / "best_bird_genome.npy"
+BEST_METADATA_PATH = PROJECT_ROOT / "outputs" / "best_bird_metadata.json"
 FITNESS_CHART_PATH = PROJECT_ROOT / "outputs" / "fitness_progression.png"
 PIPE_CHART_PATH = PROJECT_ROOT / "outputs" / "pipe_progression.png"
 TRAINING_HISTORY_PATH = PROJECT_ROOT / "outputs" / "training_history.csv"
@@ -76,6 +79,43 @@ def save_training_history(history, path):
         writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(history)
+
+
+def build_genome_metadata(
+    agent,
+    validation_metrics=None,
+    test_metrics=None,
+    mutation_rate=None,
+    mutation_strength=None,
+):
+    metadata = {
+        "input_mode": agent.input_mode,
+        "hidden_size": agent.hidden_size,
+        "processed_input_size": agent.processed_input_size,
+        "chromosome_length": agent.chromosome_length,
+        "pipe_exponent": PIPE_EXPONENT,
+    }
+    if mutation_rate is not None:
+        metadata["mutation_rate"] = mutation_rate
+    if mutation_strength is not None:
+        metadata["mutation_strength"] = mutation_strength
+    if validation_metrics:
+        metadata.update(validation_metrics)
+    if test_metrics:
+        metadata.update({f"test_{key}": value for key, value in test_metrics.items()})
+    return metadata
+
+
+def save_genome_metadata(metadata, path=BEST_METADATA_PATH):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as metadata_file:
+        json.dump(metadata, metadata_file, indent=2, sort_keys=True)
+        metadata_file.write("\n")
+
+
+def load_genome_metadata(path=BEST_METADATA_PATH):
+    with path.open(encoding="utf-8") as metadata_file:
+        return json.load(metadata_file)
 
 
 def save_progress_plots(history):
@@ -155,22 +195,40 @@ def summarize_population(results):
     }
 
 
-def validate_candidates(population, seeds=VALIDATION_SEEDS, workers=1, executor=None):
+def validate_candidates(
+    population,
+    seeds=VALIDATION_SEEDS,
+    workers=1,
+    executor=None,
+    input_mode="raw180",
+    hidden_size=16,
+):
     grouped_results = evaluate_population_on_seed_batch(
         population,
         seeds=seeds,
         workers=workers,
         executor=executor,
+        input_mode=input_mode,
+        hidden_size=hidden_size,
     )
     return [summarize_validation_results(results) for results in grouped_results]
 
 
-def validate_champion(chromosome, seeds=TEST_SEEDS, workers=1, executor=None):
+def validate_champion(
+    chromosome,
+    seeds=TEST_SEEDS,
+    workers=1,
+    executor=None,
+    input_mode="raw180",
+    hidden_size=16,
+):
     results = evaluate_chromosome_on_seeds(
         chromosome,
         seeds=seeds,
         workers=workers,
         executor=executor,
+        input_mode=input_mode,
+        hidden_size=hidden_size,
     )
     return summarize_validation_results(results)
 
@@ -185,6 +243,22 @@ def resolve_worker_count(requested_workers=None, no_parallel=False):
     if requested_workers is None:
         return default_worker_count()
     return max(1, requested_workers)
+
+
+def parse_mutation_rate(value):
+    try:
+        mutation_rate = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "mutation rate must be a number in the range 0.0 < mutation_rate < 1.0"
+        ) from exc
+
+    if not 0.0 < mutation_rate < 1.0:
+        raise argparse.ArgumentTypeError(
+            "mutation rate must be in the range 0.0 < mutation_rate < 1.0"
+        )
+
+    return mutation_rate
 
 
 def parse_args(argv=None):
@@ -217,6 +291,27 @@ def parse_args(argv=None):
         default=None,
         help="Override the configured target pipe count.",
     )
+    parser.add_argument(
+        "--input-mode",
+        choices=sorted(BirdAgent.INPUT_MODE_SIZES),
+        default="raw180",
+        help="Observation preprocessing mode.",
+    )
+    parser.add_argument(
+        "--hidden-size",
+        type=int,
+        default=16,
+        help="Number of hidden units in the controller network.",
+    )
+    parser.add_argument(
+        "--mutation-rate",
+        type=parse_mutation_rate,
+        default=None,
+        help=(
+            "Mutation probability for normal offspring. "
+            f"Defaults to the configured value ({MUTATION_RATE})."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -233,6 +328,9 @@ def train_evolutionary_ai(
     generations=None,
     target_pipes=None,
     early_stop_on_target=None,
+    input_mode="raw180",
+    hidden_size=16,
+    mutation_rate=None,
 ):
     suppress_gymnasium_observation_warnings()
 
@@ -244,8 +342,12 @@ def train_evolutionary_ai(
         target_pipes = TARGET_PIPES
     if early_stop_on_target is None:
         early_stop_on_target = EARLY_STOP_ON_TARGET
+    if mutation_rate is None:
+        mutation_rate = MUTATION_RATE
+    else:
+        mutation_rate = parse_mutation_rate(str(mutation_rate))
 
-    agent_meta = BirdAgent()
+    agent_meta = BirdAgent(input_mode=input_mode, hidden_size=hidden_size)
     chromosome_length = agent_meta.chromosome_length
 
     BEST_GENOME_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -254,12 +356,17 @@ def train_evolutionary_ai(
     training_history = []
     global_best_genome = None
     global_best_result = None
+    global_best_mutation_strength = None
     total_start_time = time.perf_counter()
 
     print(
         "Starting evolutionary training. "
         f"Population: {POPULATION_SIZE} | Generations: {generations} | "
         f"Workers: {workers} | Target pipes: {target_pipes} | "
+        f"Input mode: {input_mode} | Hidden size: {hidden_size} | "
+        f"Chromosome length: {chromosome_length} | "
+        f"Mutation rate: {mutation_rate:.3f} | "
+        f"Initial mutation strength: {INITIAL_MUTATION_STRENGTH:.3f} | "
         f"Validation seeds: {len(VALIDATION_SEEDS)} | "
         f"Early stopping: {'enabled' if early_stop_on_target else 'disabled'}\n"
     )
@@ -275,6 +382,7 @@ def train_evolutionary_ai(
     try:
         for generation_index in range(generations):
             generation = generation_index + 1
+            mutation_strength = adaptive_mutation_strength(generation_index, generations)
             generation_start_time = time.perf_counter()
 
             population_eval_start_time = time.perf_counter()
@@ -282,6 +390,8 @@ def train_evolutionary_ai(
                 population,
                 workers=workers,
                 executor=executor,
+                input_mode=input_mode,
+                hidden_size=hidden_size,
             )
             population_eval_time = time.perf_counter() - population_eval_start_time
 
@@ -299,12 +409,24 @@ def train_evolutionary_ai(
                 seeds=VALIDATION_SEEDS,
                 workers=workers,
                 executor=executor,
+                input_mode=input_mode,
+                hidden_size=hidden_size,
             )
             for candidate_index, validation_result in enumerate(validation_results):
                 if is_better_result(validation_result, global_best_result):
                     global_best_result = validation_result
                     global_best_genome = population[candidate_index].copy()
+                    global_best_mutation_strength = mutation_strength
                     np.save(BEST_GENOME_PATH, global_best_genome)
+                    save_genome_metadata(
+                        build_genome_metadata(
+                            agent_meta,
+                            validation_metrics=global_best_result,
+                            mutation_rate=mutation_rate,
+                            mutation_strength=global_best_mutation_strength,
+                        ),
+                        BEST_METADATA_PATH,
+                    )
                     print(
                         "New global best saved | "
                         f"Validated mean/min pipes: "
@@ -320,15 +442,24 @@ def train_evolutionary_ai(
                     seeds=VALIDATION_SEEDS,
                     workers=workers,
                     executor=executor,
+                    input_mode=input_mode,
+                    hidden_size=hidden_size,
                 )
                 if is_better_result(champion_result, global_best_result):
                     global_best_result = champion_result
                     np.save(BEST_GENOME_PATH, global_best_genome)
+                    save_genome_metadata(
+                        build_genome_metadata(
+                            agent_meta,
+                            validation_metrics=global_best_result,
+                            mutation_rate=mutation_rate,
+                            mutation_strength=global_best_mutation_strength,
+                        ),
+                        BEST_METADATA_PATH,
+                    )
 
             validation_time = time.perf_counter() - validation_start_time
 
-            mutation_strength = adaptive_mutation_strength(generation_index, generations)
-            mutation_rate = MUTATION_RATE
             random_immigrant_ratio = RANDOM_IMMIGRANT_RATIO
             champion_offspring_ratio = CHAMPION_OFFSPRING_RATIO
             should_stop = should_stop_training(
@@ -408,6 +539,18 @@ def train_evolutionary_ai(
                 seeds=TEST_SEEDS,
                 workers=workers,
                 executor=executor,
+                input_mode=input_mode,
+                hidden_size=hidden_size,
+            )
+            save_genome_metadata(
+                build_genome_metadata(
+                    agent_meta,
+                    validation_metrics=global_best_result,
+                    test_metrics=test_result,
+                    mutation_rate=mutation_rate,
+                    mutation_strength=global_best_mutation_strength,
+                ),
+                BEST_METADATA_PATH,
             )
             print(
                 "Test evaluation | "
@@ -425,6 +568,7 @@ def train_evolutionary_ai(
     save_progress_plots(training_history)
 
     print(f"\nTraining complete! Best genome saved as '{BEST_GENOME_PATH}'")
+    print(f"Best genome metadata saved as '{BEST_METADATA_PATH}'")
     print(f"Training history saved as '{TRAINING_HISTORY_PATH}'")
     print(f"Fitness plot saved as '{FITNESS_CHART_PATH}'")
     print(f"Pipe plot saved as '{PIPE_CHART_PATH}'")
@@ -439,6 +583,9 @@ def main():
         generations=args.generations,
         target_pipes=args.target_pipes,
         early_stop_on_target=not args.no_early_stop,
+        input_mode=args.input_mode,
+        hidden_size=args.hidden_size,
+        mutation_rate=args.mutation_rate,
     )
 
 
